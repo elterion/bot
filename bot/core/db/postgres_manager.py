@@ -277,45 +277,6 @@ class DBManager:
 
         return pl.DataFrame(rows, schema=colnames, orient="row")
 
-    def add_orderbook(self, symbol: str,
-                     time: datetime, bid_price: float, bid_volume: float,
-                     ask_price: float, ask_volume: float):
-        """
-        Сохраняет состояние биржевого стакана в таблицу tick_ob
-
-        Args:
-            symbol: символ торговой пары
-            time: время обновления
-            bid_price: цена лучшего бида
-            bid_volume: объем лучшего бида
-            ask_price: цена лучшего аска
-            ask_volume: объем лучшего аска
-        """
-
-        query = """
-            INSERT INTO tick_ob (
-                token, time,
-                bid_price, bid_size, ask_price, ask_size
-            ) VALUES (%s, %s, %s, %s, %s, %s)
-        """
-        with self.conn.cursor() as cur:
-            cur.execute(query, (
-                symbol, time, bid_price, bid_volume, ask_price, ask_volume
-            ))
-
-    def add_orderbook_bulk(self, df):
-        query = """
-            INSERT INTO tick_ob (
-                token, time, bid_price, bid_size, ask_price, ask_size
-            ) VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (token, time)
-                DO NOTHING
-        """
-
-        data = df.rows()
-        with self.conn.cursor() as cur:
-            cur.executemany(query, data)
-
     def update_tick_ob(self, orderbooks):
         rows = []
         for name, ob in orderbooks.items():

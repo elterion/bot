@@ -23,20 +23,8 @@ async def main(demo=False, token_list=None):
     await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
-    token_list = ['1INCH_USDT', 'APT_USDT', 'ARB_USDT', 'ARKM_USDT',
-              'BLUR_USDT',
-              'CELO_USDT', 'CHZ_USDT', 'CRV_USDT', 'CVX_USDT',
-              'DOT_USDT', 'DYDX_USDT', 'FIL_USDT', 'FLOW_USDT',
-              'GALA_USDT', 'GMT_USDT', 'GRT_USDT', 'JASMY_USDT',
-              'IMX_USDT', 'IOTA_USDT', 'KAS_USDT', 'KSM_USDT',
-              'LDO_USDT',
-              'MANA_USDT', 'MANTA_USDT', 'MORPHO_USDT', 'MOVE_USDT', 'NEAR_USDT',
-              'ONDO_USDT', 'OP_USDT', 'ORDI_USDT',
-              'POL_USDT', 'RENDER_USDT', 'ROSE_USDT',
-              'SAND_USDT', 'SEI_USDT', 'STRK_USDT',
-              'STX_USDT', 'SUI_USDT', 'SUSHI_USDT',
-              'TIA_USDT', 'VET_USDT', 'XRP_USDT',
-              'ZEN_USDT', 'ZK_USDT']
+    with open('./bot/config/tokens.txt', 'r') as file:
+        token_list = [line.strip() for line in file.readlines()]
 
     demo = False
 

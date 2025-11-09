@@ -413,12 +413,12 @@ if __name__ == '__main__':
     max_pairs = 5      # Максимальное кол-во открытых позиций
     leverage = 2       # Плечо
     fee_rate = 0.00055 # Процент комиссии биржи
-    td = 120           # За сколько последних часов брать историю
 
     tf = '4h'
     wind = 24
     thresh_in = 2.25
     thresh_out = 0.25
+    td = int(tf[0]) * wind * 2 # За сколько последних часов брать историю
 
 
     main(demo, open_new_orders, tf, wind, thresh_in, thresh_out,

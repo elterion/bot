@@ -86,16 +86,18 @@ class BybitWebSocketClient(BaseWebSocketClient):
         elif msg_type == "delta":
             ob.update_delta(bid, ask, cts)
 
-        now = round(datetime.timestamp(datetime.now()), 1)
+        now = datetime.now()
+        current_ts = round(datetime.timestamp(now), 1)
+        current_second = now.second
 
-        if now - self.last_update_time > 0.2:
-            self.last_update_time = now
+        if current_ts - self.last_update_time > 0.2:
+            self.last_update_time = current_ts
             self.postgre_client.update_current_ob(self.orderbooks)
 
-        if int(now) - self.last_update_hist > 3 and int(now) % 5 == 0:
+        if current_ts - self.last_update_hist > 3 and current_second % 5 == 0:
             self.postgre_client.update_tick_ob(self.orderbooks)
             self.postgre_client.set_system_state('ws')
-            self.last_update_hist = int(now)
+            self.last_update_hist = current_ts
 
     async def handle_order_stream(self, msg):
         ct = datetime.now().strftime('%H:%M:%S')

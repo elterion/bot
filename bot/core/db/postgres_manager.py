@@ -321,8 +321,8 @@ class DBManager:
         for name, ob in orderbooks.items():
             top_bids = ob.get_top_n_bids(1)
             top_asks = ob.get_top_n_asks(1)
-            update_ts = ob.update_ts
 
+            update_ts = int(datetime.timestamp(datetime.now()))
             update_time = datetime.fromtimestamp(update_ts, tz=ZoneInfo("Europe/Moscow"))
 
             row = (
@@ -335,9 +335,12 @@ class DBManager:
         query = """
                 INSERT INTO tick_ob (
                     token, time, bid_price, bid_size, ask_price, ask_size
-                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ) VALUES (
+                    %s,
+                    (to_timestamp(ROUND(EXTRACT(epoch FROM %s::timestamptz) / 5) * 5)) AT TIME ZONE 'Europe/Moscow',
+                    %s, %s, %s, %s
+                )
                 ON CONFLICT (token, time) DO UPDATE SET
-                    time = EXCLUDED.time,
                     bid_price = EXCLUDED.bid_price,
                     bid_size = EXCLUDED.bid_size,
                     ask_price = EXCLUDED.ask_price,

@@ -25,6 +25,9 @@ def main(demo):
     ct = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print(f'{ct} Начинаем работу...')
 
+    print(f'{ct} Загружаем открытые позиции...')
+    active_positions = trade_manager.get_all_positions(market_type='linear')
+
     last_time = int(datetime.timestamp(datetime.now()))
     err_counter = 0
 
@@ -67,6 +70,53 @@ def main(demo):
 
                 postgre_manager.update_pairs(pairs_data)
                 last_time = int(datetime.timestamp(datetime.now()))
+
+            # --------------- Проверка сработавших стоп-лоссов --------------
+            if len(active_orders) * 2 != len(active_positions):
+                # Позиции, существующие на бирже
+                tokens_in_position = [pos['token'] for pos in active_positions]
+
+                # Позиции, которые в теории должны быть на бирже
+                tokens_in_table = active_orders['token_1'].to_list() + active_orders['token_2'].to_list()
+                missed_tokens = set(tokens_in_table) - set(tokens_in_position)
+
+                for token in missed_tokens:
+                    missed_order = active_orders.filter(
+                            (pl.col('token_1') == token) | (pl.col('token_2') == token)
+                        ).with_columns(
+                                (pl.when(pl.col("token_1") == token)
+                                .then(pl.col("token_2"))
+                                .otherwise(pl.col("token_1"))).alias('token'),
+
+                                (pl.when(pl.col("token_1") == token)
+                                    .then(pl.col("side_1"))
+                                    .otherwise(pl.col("side_2"))).alias('side'),
+
+                                (pl.when(pl.col("token_1") == token)
+                                    .then(pl.col("qty_2"))
+                                    .otherwise(pl.col("qty_1"))).alias('qty'),
+                        ).select('token_1', 'token_2', 'token', 'side', 'qty')
+                    token_1 = missed_order.select('token_1').item()
+                    token_2 = missed_order.select('token_2').item()
+                    sym = missed_order.select('token').item()
+                    side = missed_order.select('side').item()
+                    qty = missed_order.select('qty').item()
+                    print(sym, side, qty)
+
+                    pos_side = 'Buy' if side == 'long' else 'Sell'
+
+                    resp = trade_manager.place_market_order('linear', sym, pos_side, qty)
+
+                    # Тут надо реализовать подсчёт потерь
+
+                    postgre_manager.delete_pair_order(token_1, token_2)
+                    print(f'Позиция {token_1[:-5]} - {token_2[:-5]} закрылась по СТОП-ЛОССУ!')
+
+                    # Обновляем актуальные позиции
+                    active_positions = trade_manager.get_all_positions(market_type='linear')
+                    pairs = postgre_manager.get_table('pairs', df_type='polars')
+                    pending_orders = pairs.filter(pl.col('status').is_in(['opening', 'closing']))
+                    active_orders = pairs.filter(pl.col('status') == 'active')
 
             # ------------ Обработка открытия и закрытия ордеров ------------
             for row in pending_orders.iter_rows(named=True):
@@ -112,6 +162,10 @@ def main(demo):
                     print(f'{ct}. Open position. {act_1} {token_1[:-5]}; {act_2} {token_2[:-5]}')
                     err_counter = 0
 
+                    # Обновляем открытые позиции
+                    sleep(0.5)
+                    active_positions = trade_manager.get_all_positions(market_type='linear')
+
                 elif status == 'closing':
                     sl_1, sl_2 = None, None
                     act_1 = 'Buy' if side_1 == 'short' else 'Sell'
@@ -133,10 +187,14 @@ def main(demo):
                     print(f'{ct}. Close position. {act_1} {token_1[:-5]}; {act_2} {token_2[:-5]}')
                     err_counter = 0
 
+                    # Обновляем открытые позиции
+                    sleep(0.5)
+                    active_positions = trade_manager.get_all_positions(market_type='linear')
+
             sleep(0.5)
 
         except (Timeout, ConnectionError) as err:
-            print('Timeout error:', err)
+            print(f'{ct} Timeout error.')
             sleep(5)
         except KeyError as err:
             print('Не удалось обновить позицию:', err)

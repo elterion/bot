@@ -199,8 +199,6 @@ def main():
         raise NotImplementedError('Неизвестный режим работы бота!')
 
     open_new_orders = config['open_new_orders']
-
-
     min_order = config['min_order']
     max_order = config['max_order']
     max_pairs = config['max_pairs']
@@ -246,7 +244,10 @@ def main():
     high_in = thresh_in
     high_out = thresh_out
 
-    print(f'{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Старт основного цикла.')
+    time_now = datetime.now()
+    last_zscore_update_time = int(datetime.timestamp(time_now))
+    print(f'{time_now.strftime('%Y-%m-%d %H:%M:%S')} Старт основного цикла.')
+
     while True:
         try:
             zscore_arr = []
@@ -424,7 +425,10 @@ def main():
                     update_positions_flag = True
                     break
 
-            postgre_manager.add_data_to_zscore_history(zscore_arr)
+            zscore_upd_time = int(datetime.timestamp(datetime.now()))
+            if zscore_upd_time - last_zscore_update_time >= 10:
+                postgre_manager.add_data_to_zscore_history(zscore_arr)
+                last_zscore_update_time = zscore_upd_time
 
             sleep(0.5)
 

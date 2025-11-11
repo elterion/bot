@@ -22,6 +22,7 @@ class BybitWebSocketClient(BaseWebSocketClient):
         self.orderbooks = dict()
         self.last_update_time = round(datetime.timestamp(datetime.now()), 1)
         self.last_update_hist = int(datetime.timestamp(datetime.now()))
+        self.min_size = 100 # Размер в usdt
 
     def _create_symbol_name(self, symbol, **kwargs):
         return ''.join(symbol.split('_'))
@@ -60,13 +61,13 @@ class BybitWebSocketClient(BaseWebSocketClient):
         elif stream_type == 'system_message':
             logger.info(msg)
         elif stream_type == 'orderbook':
-            await self.handle_orderbook_stream(msg, verbose=False)
+            await self.handle_orderbook_stream(msg)
         elif stream_type == 'order':
             await self.handle_order_stream(msg)
         else:
             logger.info(f'bybit default handler: {msg}')
 
-    async def handle_orderbook_stream(self, msg, verbose=False):
+    async def handle_orderbook_stream(self, msg):
         msg_type = msg.get('type', '')
         data = msg.get('data', {})
         tkn = data.get('s', '')
@@ -79,10 +80,8 @@ class BybitWebSocketClient(BaseWebSocketClient):
             self.orderbooks[symbol] = Orderbook(symbol=symbol)
 
         ob = self.orderbooks[symbol]
-
         if msg_type == "snapshot":
             ob.update_snapshot(bid, ask, cts)
-
         elif msg_type == "delta":
             ob.update_delta(bid, ask, cts)
 
@@ -95,7 +94,10 @@ class BybitWebSocketClient(BaseWebSocketClient):
             self.postgre_client.update_current_ob(self.orderbooks)
 
         if current_ts - self.last_update_hist > 3 and current_second % 5 == 0:
-            self.postgre_client.update_tick_ob(self.orderbooks)
+            rows = []
+            for name, ob in self.orderbooks.items():
+                rows.append(ob.get_tick_ob(min_order = self.min_size))
+            self.postgre_client.update_tick_ob(rows)
             self.postgre_client.set_system_state('ws')
             self.last_update_hist = current_ts
 

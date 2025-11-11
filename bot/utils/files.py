@@ -1,5 +1,10 @@
 import os
 import re
+import yaml
+
+def load_config(path):
+    with open(path, 'r') as f:
+        return yaml.safe_load(f)
 
 def load_tokens_from_file(file_name):
     """
@@ -22,7 +27,7 @@ def get_saved_coins(data_folder):
 
     for filename in os.listdir(data_folder):
         file_path = os.path.join(data_folder, filename)
-        
+
         # Проверяем, что это файл и соответствует шаблону
         if os.path.isfile(file_path):
             match = pattern.match(filename)

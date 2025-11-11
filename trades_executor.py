@@ -8,12 +8,23 @@ from requests.exceptions import Timeout, ConnectionError
 from bot.core.db.postgres_manager import DBManager
 from bot.config.credentials import host, user, password, db_name
 from bot.core.exchange.trade_api import Trade
+from bot.utils.files import load_config
 
-def main(demo):
-    if demo:
+def main():
+    config = load_config('./bot/config/config.yaml')
+    mode = config['mode']
+
+    if mode == 'demo':
         print('DEMO mode.')
-    else:
+        demo = True
+    elif mode == 'real':
         print('========= REAL MONEY mode! =========')
+        demo = False
+    elif mode == 'test':
+        print('TEST mode.')
+        demo = True
+    else:
+        raise NotImplementedError('Неизвестный режим работы бота!')
 
     db_params = {'host': host, 'user': user, 'password': password, 'dbname': db_name}
     postgre_manager = DBManager(db_params)
@@ -210,9 +221,4 @@ def main(demo):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Мониторинг торгового бота")
-    parser.add_argument('--demo', action='store_true', help='Включить демонстрационный режим')
-    args = parser.parse_args()
-    demo = args.demo
-
-    main(demo)
+    main()

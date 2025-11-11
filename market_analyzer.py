@@ -1,6 +1,7 @@
 from bot.core.exchange.http_api import ExchangeManager, BybitRestAPI
 from bot.utils.coins import get_step_info, get_price_scale
 from bot.core.exchange.trade_api import set_leverage
+from bot.utils.files import load_config
 
 from bot.core.db.postgres_manager import DBManager
 from bot.config.credentials import host, user, password, db_name
@@ -118,7 +119,7 @@ def calculate_profit(open_price, close_price, n_coins, side, fee_rate=0.00055):
     return profit
 
 @lru_cache
-def set_leverage_cached(token, leverage):
+def set_leverage_cached(demo, token, leverage):
     set_leverage(demo=demo, symbol=token + '_USDT', leverage=leverage)
 
 def write_order_log(ts, ct, token_1, token_2, tf, wind, thresh_in, thresh_out, side, action,
@@ -180,8 +181,38 @@ def write_order_log(ts, ct, token_1, token_2, tf, wind, thresh_in, thresh_out, s
     with open('./logs/trades.jsonl', 'a', encoding='utf-8') as f:
         f.write(json_log + '\n')
 
-def main(demo, open_new_orders, tf, wind, thresh_in, thresh_out,
-         max_order, min_order, max_pairs, leverage, fee_rate, td):
+def main():
+    exchange = 'bybit'
+    config = load_config('./bot/config/config.yaml')
+    mode = config['mode']
+
+    if mode == 'demo':
+        print('DEMO mode.')
+        demo = True
+    elif mode == 'real':
+        print('========= REAL MONEY mode! =========')
+        demo = False
+    elif mode == 'test':
+        print('TEST mode.')
+        demo = True
+    else:
+        raise NotImplementedError('Неизвестный режим работы бота!')
+
+    open_new_orders = config['open_new_orders']
+
+
+    min_order = config['min_order']
+    max_order = config['max_order']
+    max_pairs = config['max_pairs']
+    leverage = config['leverage']
+    fee_rate = config['fee_rate']
+
+    tf = config['tf']
+    wind = config['wind']
+    thresh_in = config['thresh_in']
+    thresh_out = config['thresh_out']
+    td = int(tf[0]) * wind * 2 # За сколько последних часов брать историю
+
     update_positions_flag = False
 
     print(f'{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Начинаем работу...')
@@ -207,8 +238,8 @@ def main(demo, open_new_orders, tf, wind, thresh_in, thresh_out,
 
     print(f'{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Обновление плечей на бирже ByBit')
     for t1_name, t2_name in token_pairs:
-        set_leverage_cached(token=t1_name, leverage=leverage)
-        set_leverage_cached(token=t2_name, leverage=leverage)
+        set_leverage_cached(demo, token=t1_name, leverage=leverage)
+        set_leverage_cached(demo, token=t2_name, leverage=leverage)
 
     low_in = -thresh_in
     low_out = -thresh_out
@@ -263,7 +294,7 @@ def main(demo, open_new_orders, tf, wind, thresh_in, thresh_out,
 
             # --- Секундный датафрейм для подсчёта среднего значения ---
             end_t = datetime.now().replace(tzinfo=ZoneInfo("Europe/Moscow"))
-            st_t = end_t - timedelta(seconds = 20)
+            st_t = end_t - timedelta(seconds = 30)
 
             tick_df = postgre_manager.get_tick_ob(start_time=st_t).with_columns(
                 ((pl.col('bid_price') + pl.col('ask_price')) / 2.0).alias('avg_price')
@@ -289,14 +320,14 @@ def main(demo, open_new_orders, tf, wind, thresh_in, thresh_out,
                 t2_tick_df = tick_df.filter(pl.col('token') == token_2)
 
                 # --- Проверяем, что датафрейм не пустой ---
-                if t1_tick_df.height < 2 or t2_tick_df.height < 2:
+                if t1_tick_df.height < 3 or t2_tick_df.height < 3:
                     continue
 
                 # --- Проверяем, что этой пары нет в очереди на закрытие ---
-                # if pairs.filter((pl.col('token_1') == token_1) &
-                #                 (pl.col('token_2') == token_2) &
-                #                 (pl.col('status') == 'closing')).height > 0:
-                #     continue
+                if pairs.filter((pl.col('token_1') == token_1) &
+                                (pl.col('token_2') == token_2) &
+                                (pl.col('status') == 'closing')).height > 0:
+                    continue
 
                 # Пропускаем пару, если уже открыто максимальное количество позиций,
                 # а для этой пары позиция не открыта
@@ -403,23 +434,4 @@ def main(demo, open_new_orders, tf, wind, thresh_in, thresh_out,
 
 
 if __name__ == '__main__':
-    demo = True
-    open_new_orders = True # Открывать новые позиции или только закрываем уже существующие
-
-
-    exchange = 'bybit'
-    min_order = 40     # Минимальный размер ордера
-    max_order = 50     # Максимальный размер одного плеча в парной позиции
-    max_pairs = 5      # Максимальное кол-во открытых позиций
-    leverage = 2       # Плечо
-    fee_rate = 0.00055 # Процент комиссии биржи
-
-    tf = '4h'
-    wind = 24
-    thresh_in = 2.25
-    thresh_out = 0.25
-    td = int(tf[0]) * wind * 2 # За сколько последних часов брать историю
-
-
-    main(demo, open_new_orders, tf, wind, thresh_in, thresh_out,
-         max_order, min_order, max_pairs, leverage, fee_rate, td)
+    main()

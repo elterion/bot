@@ -277,22 +277,7 @@ class DBManager:
 
         return pl.DataFrame(rows, schema=colnames, orient="row")
 
-    def update_tick_ob(self, orderbooks):
-        rows = []
-        for name, ob in orderbooks.items():
-            top_bids = ob.get_top_n_bids(1)
-            top_asks = ob.get_top_n_asks(1)
-
-            update_ts = int(datetime.timestamp(datetime.now()))
-            update_time = datetime.fromtimestamp(update_ts, tz=ZoneInfo("Europe/Moscow"))
-
-            row = (
-                ob.symbol, update_time,
-                top_bids[0][0], top_bids[0][1],
-                top_asks[0][0], top_asks[0][1],
-            )
-            rows.append(row)
-
+    def update_tick_ob(self, rows):
         query = """
                 INSERT INTO tick_ob (
                     token, time, bid_price, bid_size, ask_price, ask_size

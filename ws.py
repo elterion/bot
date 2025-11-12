@@ -13,10 +13,11 @@ async def manage_subscriptions(bybit_client=None, okx_client=None, gate_client=N
 
 async def main(demo=False, token_list=None):
     bybit_client = BybitWebSocketClient(demo=demo)
+    logger.info('Очищаем таблицу PostgreSQL')
+    bybit_client.postgre_client.clear_table('current_ob')
 
     tasks = [
         bybit_client.connect("orderbook", auth_required=False),
-
         manage_subscriptions(bybit_client=bybit_client,
                              token_list=token_list),
     ]

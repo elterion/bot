@@ -2,6 +2,7 @@ from bot.core.exchange.http_api import ExchangeManager, BybitRestAPI
 from bot.utils.coins import get_step_info, get_price_scale
 from bot.core.exchange.trade_api import set_leverage
 from bot.utils.files import load_config
+from requests.exceptions import Timeout, ConnectionError
 
 from bot.core.db.postgres_manager import DBManager
 from bot.config.credentials import host, user, password, db_name
@@ -81,21 +82,14 @@ def close_position(token_1, token_2, t1_data, t2_data, side_1, side_2, db_manage
         act_2 = 'buy' if side_2 == 'short' else 'sell'
         print(f'{ct} [{side_1} close] {act_1} {open_qty_1} {token_1[:-5]}; {act_2} {open_qty_2} {token_2[:-5]}')
 
-def check_open_conditions(token_1: str, token_2: str, current_pairs: pl.DataFrame) -> bool:
-    token_in_positions = current_pairs.filter((pl.col('token_1') == token_1) & (pl.col('token_2') == token_2)).height
+def check_tokens(token_1: str, token_2: str, current_pairs: pl.DataFrame) -> bool:
+    active_tokens = current_pairs['token_1'].to_list() + current_pairs['token_2'].to_list()
+    in_pos = token_1 in active_tokens or token_2 in active_tokens
 
-    if token_in_positions:
+    if in_pos:
         return False
     else:
         return True
-
-def check_close_conditions(token_1: str, token_2: str, current_pairs: pl.DataFrame) -> bool:
-    token_in_positions = current_pairs.filter((pl.col('token_1') == token_1) & (pl.col('token_2') == token_2)).height
-
-    if token_in_positions:
-        return True
-    else:
-        return False
 
 def get_hist_df(postgre_manager, start_time):
     hour_1_df = postgre_manager.get_orderbooks(interval='1h', start_date=start_time)
@@ -120,7 +114,10 @@ def calculate_profit(open_price, close_price, n_coins, side, fee_rate=0.00055):
 
 @lru_cache
 def set_leverage_cached(demo, token, leverage):
-    set_leverage(demo=demo, symbol=token + '_USDT', leverage=leverage)
+    try:
+        set_leverage(demo=demo, symbol=token + '_USDT', leverage=leverage)
+    except Timeout:
+        print(f'Проблема с изменением leverage для токена {token}.')
 
 def write_order_log(ts, ct, token_1, token_2, tf, wind, thresh_in, thresh_out, side, action,
                     t1, t2, t1_bid_price, t1_ask_price, t2_bid_price, t2_ask_price,
@@ -237,7 +234,9 @@ def main():
     print(f'{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Обновление плечей на бирже ByBit')
     for t1_name, t2_name in token_pairs:
         set_leverage_cached(demo, token=t1_name, leverage=leverage)
+        sleep(0.5)
         set_leverage_cached(demo, token=t2_name, leverage=leverage)
+        sleep(0.5)
 
     low_in = -thresh_in
     low_out = -thresh_out
@@ -371,26 +370,22 @@ def main():
                 beta = beta[0]
 
                 # ----- Проверяем условия для входа в позицию -----
-                if open_new_orders and pairs.height < max_pairs:
-                    t1_avail = check_open_conditions(token_1, token_2, pairs)
-                    t2_avail = check_open_conditions(token_1, token_2, pairs)
+                if open_new_orders and pairs.height < max_pairs and check_tokens(token_1, token_2, pairs):
+                    # Проверяем открытие long-позиции по token_1 и short-позиции по token_2
+                    if zscore < low_in and z_score_curr < low_in:
+                        open_position(token_1, token_2, t1_curr_data, t2_curr_data,
+                                'long', 'short', leverage, min_order, max_order, fee_rate,
+                                coin_information, postgre_manager)
+                        update_positions_flag = True
+                        break
 
-                    if t1_avail and t2_avail:
-                        # Проверяем открытие long-позиции по token_1 и short-позиции по token_2
-                        if zscore < low_in and z_score_curr < low_in:
-                            open_position(token_1, token_2, t1_curr_data, t2_curr_data,
-                                    'long', 'short', leverage, min_order, max_order, fee_rate,
-                                    coin_information, postgre_manager)
-                            update_positions_flag = True
-                            break
-
-                        # Проверяем открытие short-позиции по token_1 и long-позиции по token_2
-                        if zscore > high_in and z_score_curr > high_in:
-                            open_position(token_1, token_2, t1_curr_data, t2_curr_data,
-                                    'short', 'long', leverage, min_order, max_order, fee_rate,
-                                    coin_information, postgre_manager)
-                            update_positions_flag = True
-                            break
+                    # Проверяем открытие short-позиции по token_1 и long-позиции по token_2
+                    if zscore > high_in and z_score_curr > high_in:
+                        open_position(token_1, token_2, t1_curr_data, t2_curr_data,
+                                'short', 'long', leverage, min_order, max_order, fee_rate,
+                                coin_information, postgre_manager)
+                        update_positions_flag = True
+                        break
 
                 # ----- Проверяем условия выхода из позиции -----
                 opened = active_orders.filter(

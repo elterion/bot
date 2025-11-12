@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
 from sortedcontainers import SortedDict
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 @dataclass
 class Orderbook:
@@ -52,3 +54,24 @@ class Orderbook:
     def get_top_n_asks(self, n = 10):
         """Получить топ N лучших ask цен"""
         return [(p, v) for p, v in list(self.asks.items())[:n]]
+
+    def __get_best_price(self, book, min_order):
+        total_usdt = 0
+        total_vol = 0
+
+        for price, vol in book.items():
+
+            curr_usdt = price * vol
+            total_vol += vol
+            total_usdt += curr_usdt
+
+            if total_usdt > min_order:
+                return price, total_vol
+
+    def get_tick_ob(self, min_order):
+        bid_price, bid_size = self.__get_best_price(self.bids, min_order)
+        ask_price, ask_size = self.__get_best_price(self.asks, min_order)
+
+        update_time = datetime.fromtimestamp(self.update_ts, tz=ZoneInfo("Europe/Moscow"))
+
+        return (self.symbol, update_time, bid_price, bid_size, ask_price, ask_size)

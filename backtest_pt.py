@@ -1,5 +1,5 @@
-from jaref_bot.analysis.pair_trading import backtest
-from jaref_bot.analysis.strategy_analysis import analyze_strategy
+from bot.analysis.pair_trading import backtest
+from bot.analysis.strategy_analysis import analyze_strategy
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import polars as pl
@@ -8,12 +8,12 @@ from tqdm import tqdm
 import heapq
 import pickle
 
-from jaref_bot.core.db.postgres_manager import DBManager
-from jaref_bot.config.credentials import host, user, password, db_name
+from bot.core.db.postgres_manager import DBManager
+from bot.config.credentials import host, user, password, db_name
 db_params = {'host': host, 'user': user, 'password': password, 'dbname': db_name}
 db_manager = DBManager(db_params)
 
-from jaref_bot.core.exchange.http_api import ExchangeManager, BybitRestAPI
+from bot.core.exchange.http_api import ExchangeManager, BybitRestAPI
 
 def base(token: str) -> str:
     return token.split('_')[0] if '_' in token else token
@@ -169,19 +169,17 @@ def main(method, in_params, out_params, dist_in_params, dist_out_params, hour4_w
 
 if __name__ == '__main__':
     spread_method = 'lr'
-    valid_length = 10
-    train_length = 10
 
     in_params = (1.6, 1.8, 2.0, 2.25, 2.5)
     out_params = (0.0, 0.25, 0.5)
     dist_in_params = (0, )
     dist_out_params = (0, )
 
-    hour4_winds = np.array([12, 14, 16, 18, 24])
+    hour4_winds = np.array([12, 14, 16, 18, 24, 30])
     hour1_winds = np.array([18, 24, 36, 48, 64, 72, 96, 120])
 
-    end_time = datetime(2025, 11, 1, 21, 50, tzinfo=ZoneInfo("Europe/Moscow"))
-    valid_time = datetime(2025, 10, 21, 0, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+    end_time = datetime(2025, 11, 12, 0, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+    valid_time = datetime(2025, 10, 22, 0, 0, tzinfo=ZoneInfo("Europe/Moscow"))
     start_time = datetime(2025, 10, 12, 0, 0, tzinfo=ZoneInfo("Europe/Moscow"))
 
     min_trades = 2
@@ -201,7 +199,7 @@ if __name__ == '__main__':
         min_order=min_order, max_order=max_order, verbose=0,
         data_filename=data_filename,
         token_pairs_filename=token_pairs_filename,
-        save_to_file='./data/ind_thresholds.txt'
+        save_to_file='./data/pair_selection/ind_thresholds.txt'
         )
 
     db_manager.close()

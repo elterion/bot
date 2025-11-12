@@ -188,7 +188,7 @@ class Trade():
         sign = self.hashing(str(curr_time) + self.api_key + '5000' + data)
         headers = self._prepare_headers(ts=curr_time, sign=sign)
 
-        response = requests.post(url=url, headers=headers, data=data, timeout=(3, 4)).json()
+        response = requests.post(url=url, headers=headers, data=data, timeout=(5, 10)).json()
         if response['retCode'] == 0 or (response['retCode'] == 110043
                                     and response['retMsg'] == 'leverage not modified'):
             logger.debug(f'Bybit {sym} leverage successfully set to {lever}')

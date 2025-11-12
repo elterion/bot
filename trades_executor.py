@@ -1,4 +1,3 @@
-import argparse
 from time import sleep
 from datetime import datetime
 import polars as pl
@@ -37,7 +36,11 @@ def main():
     print(f'{ct} Начинаем работу...')
 
     print(f'{ct} Загружаем открытые позиции...')
-    active_positions = trade_manager.get_all_positions(market_type='linear')
+    try:
+        active_positions = trade_manager.get_all_positions(market_type='linear')
+    except Timeout:
+        print('Проблема с загрузкой начальной позиции. Биржа не отвечает.')
+        return
 
     last_time = int(datetime.timestamp(datetime.now()))
     err_counter = 0

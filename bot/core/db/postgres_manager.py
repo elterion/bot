@@ -512,6 +512,8 @@ class DBManager:
         """
         Получает все данные из заданной таблицы и возвращает их как pandas или polars DataFrame.
         """
+        assert df_type in ('pandas', 'polars'), "df_type should be 'pandas' or 'polars'"
+
         query = f"SELECT * FROM {table_name};"
         try:
             with self.conn.cursor() as cur:

@@ -342,7 +342,8 @@ def calculate_z_score(start_ts: int,
                         hist_t1: np.ndarray,
                         hist_t2: np.ndarray,
                         winds: np.ndarray,
-                        min_order: float):
+                        min_order: float,
+                        spr_method: int):
     """
     Функция на исторических данных рассчитывает z_score для каждой строки.
     Последний элемент в агрегированном датафрейме отбрасывается, так как
@@ -366,7 +367,7 @@ def calculate_z_score(start_ts: int,
     nrows = tss.shape[0]
     n_winds = winds.shape[0]
     ts_arr = np.full(nrows, np.nan)
-    spread_arr = np.full((nrows, n_winds), np.nan)
+    # spread_arr = np.full((nrows, n_winds), np.nan)
     spr_mean_arr = np.full((nrows, n_winds), np.nan)
     spr_std_arr = np.full((nrows, n_winds), np.nan)
     z_score_arr = np.full((nrows, n_winds), np.nan)
@@ -396,19 +397,22 @@ def calculate_z_score(start_ts: int,
         # Сформируем массивы, в которых к историческим данным в конец добавим текущую медианную цену, и посчитаем z_score
         t1_arr_med = np.append(t1_hist, t1_med)
         t2_arr_med = np.append(t2_hist, t2_med)
-        spread, mean_spread, spread_std, alpha, beta, zscore = get_lr_zscore(t1_arr_med, t2_arr_med, winds)
+
+        if spr_method == 0:
+            spread, mean_spread, spread_std, alpha, beta, zscore = get_lr_zscore(t1_arr_med, t2_arr_med, winds)
+        elif spr_method == 1:
+            mean_spread, spread_std, zscore = get_dist_zscore(t1_arr_med, t2_arr_med, winds)
 
         ts_arr[i] = tss[i]
-        spread_arr[i] = spread
+        # spread_arr[i] = spread
         spr_mean_arr[i] = mean_spread
         spr_std_arr[i] = spread_std
         z_score_arr[i] = zscore
 
-    return ts_arr, spread_arr, spr_mean_arr, spr_std_arr, z_score_arr
+    return ts_arr, spr_mean_arr, spr_std_arr, z_score_arr
 
-def create_zscore_df(token_1, token_2, sec_df, agg_df, tf, winds, min_order, start_ts, median_length):
-
-    # method_is_lr = 1 if spread_method == 'lr' else 0
+def create_zscore_df(token_1, token_2, sec_df, agg_df, tf, winds, min_order, start_ts, median_length, spr_method):
+    spr_method = 0 if spr_method == 'lr' else 1
 
     # --- Перевод polars в numpy ---
     tss = sec_df['ts'].to_numpy()
@@ -422,15 +426,14 @@ def create_zscore_df(token_1, token_2, sec_df, agg_df, tf, winds, min_order, sta
     hist_t2 = agg_df[token_2].to_numpy()
 
     # --- Вычисляем z_score ---
-    ts_arr, spread_arr, spr_mean_arr, spr_std_arr, z_score_arr = calculate_z_score(
+    ts_arr, spr_mean_arr, spr_std_arr, z_score_arr = calculate_z_score(
         start_ts, median_length, tss, price1, price2, size1, size2,
-                                 hist_ts, hist_t1, hist_t2, winds, min_order)
+                                 hist_ts, hist_t1, hist_t2, winds, min_order, spr_method)
 
     # --- Собираем итоговый polars DataFrame из буферов (только заполненные строки) ---
     base_df = pl.DataFrame({'ts': tss})
     for i, wind in enumerate(winds):
-        tdf = pl.DataFrame({'ts': tss, f'spread_{wind}_{tf}': spread_arr[:, i],
-                            f'spread_mean_{wind}_{tf}': spr_mean_arr[:, i],
+        tdf = pl.DataFrame({'ts': tss, f'spread_mean_{wind}_{tf}': spr_mean_arr[:, i],
                         f'spread_std_{wind}_{tf}': spr_std_arr[:, i],
                         f'z_score_{wind}_{tf}': z_score_arr[:, i]})
         base_df = base_df.join(tdf, on='ts')

@@ -24,7 +24,7 @@ from functools import lru_cache
 def round_down(value: float, dp: float):
     return round(math.floor(value / dp) * dp, 6)
 
-def open_position(token_1, token_2, t1_data, t2_data, side_1, side_2, leverage,
+def open_position(token_1, token_2, mode, t1_data, t2_data, side_1, side_2, leverage,
                   min_order, max_order, fee_rate, coin_information, db_manager):
     ct = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     t1_qty_step = get_step_info(coin_information, token_1, 'bybit_linear', 'bybit_linear')
@@ -56,7 +56,7 @@ def open_position(token_1, token_2, t1_data, t2_data, side_1, side_2, leverage,
         usdt_1 = qty_1 * price_1
         usdt_2 = qty_2 * price_2
 
-        db_manager.add_pair_order(token_1, token_2, created_at, side_1, side_2, qty_1, qty_2,
+        db_manager.add_pair_order(token_1, token_2, created_at, mode, side_1, side_2, qty_1, qty_2,
                    price_1, price_2, usdt_1 / leverage, usdt_2 / leverage, leverage=leverage, status='opening')
 
         act_1 = 'buy' if side_1 == 'long' else 'sell'
@@ -373,7 +373,7 @@ def main():
                 if open_new_orders and pairs.height < max_pairs and check_tokens(token_1, token_2, pairs):
                     # Проверяем открытие long-позиции по token_1 и short-позиции по token_2
                     if zscore < low_in and z_score_curr < low_in:
-                        open_position(token_1, token_2, t1_curr_data, t2_curr_data,
+                        open_position(token_1, token_2, mode, t1_curr_data, t2_curr_data,
                                 'long', 'short', leverage, min_order, max_order, fee_rate,
                                 coin_information, postgre_manager)
                         update_positions_flag = True
@@ -381,7 +381,7 @@ def main():
 
                     # Проверяем открытие short-позиции по token_1 и long-позиции по token_2
                     if zscore > high_in and z_score_curr > high_in:
-                        open_position(token_1, token_2, t1_curr_data, t2_curr_data,
+                        open_position(token_1, token_2, mode, t1_curr_data, t2_curr_data,
                                 'short', 'long', leverage, min_order, max_order, fee_rate,
                                 coin_information, postgre_manager)
                         update_positions_flag = True

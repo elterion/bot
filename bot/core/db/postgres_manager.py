@@ -63,7 +63,7 @@ class DBManager:
         with self.conn.cursor() as cursor:
             cursor.executemany(sql, records)
 
-    def add_pair_order(self, token_1, token_2, created_at, side_1, side_2, qty_1, qty_2,
+    def add_pair_order(self, token_1, token_2, created_at, mode, side_1, side_2, qty_1, qty_2,
                        price_1, price_2, usdt_1, usdt_2, leverage, status):
         """Добавляет новый ордер в таблицу pairs"""
 
@@ -73,14 +73,14 @@ class DBManager:
             created_at = datetime.now(Moscow_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
         query = """
-        INSERT INTO pairs (token_1, token_2, created_at, side_1, side_2, qty_1, qty_2,
+        INSERT INTO pairs (token_1, token_2, created_at, mode, side_1, side_2, qty_1, qty_2,
         open_price_1, open_price_2, usdt_1, usdt_2, leverage, rpnl_1, rpnl_2, upnl_1, upnl_2,
         profit_1, profit_2, profit, status)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, 0, 0, 0, 0, 0, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, 0, 0, 0, 0, 0, %s)
         """
 
         with self.conn.cursor() as cursor:
-            cursor.execute(query, (token_1, token_2, created_at, side_1, side_2, qty_1, qty_2,
+            cursor.execute(query, (token_1, token_2, created_at, mode, side_1, side_2, qty_1, qty_2,
                                    price_1, price_2, usdt_1, usdt_2, leverage, status))
 
     def update_pairs(self, pairs_data):
@@ -178,7 +178,7 @@ class DBManager:
         with self.conn.cursor() as cursor:
             cursor.execute("""
                 SELECT token_1, token_2, created_at, side_1, side_2, qty_1, qty_2,
-                    open_price_1, open_price_2, usdt_1, usdt_2, rpnl_1, rpnl_2, leverage
+                    open_price_1, open_price_2, usdt_1, usdt_2, rpnl_1, rpnl_2, leverage, mode
                 FROM pairs
                 WHERE token_1 = %s AND token_2 = %s
             """, (token_1, token_2))
@@ -201,6 +201,7 @@ class DBManager:
         open_fee_1 = position[11]
         open_fee_2 = position[12]
         leverage = position[13]
+        mode = position[14]
 
         fee_1 = open_fee_1 + close_fee_1
         fee_2 = open_fee_2 + close_fee_2
@@ -220,14 +221,14 @@ class DBManager:
         query = """
             INSERT INTO trading_history (token_1, token_2, open_time, close_time, side_1, side_2, qty_1, qty_2,
                 open_price_1, open_price_2, close_price_1, close_price_2, fee_1, fee_2,
-                leverage, pnl_1, pnl_2, profit)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                leverage, pnl_1, pnl_2, profit, mode)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
         with self.conn.cursor() as cursor:
             cursor.execute(query, (t1, t2, open_time, close_time, side_1, side_2, qty_1, qty_2,
                 open_price_1, open_price_2, close_price_1, close_price_2, fee_1, fee_2,
-                leverage, pnl_1, pnl_2, profit))
+                leverage, pnl_1, pnl_2, profit, mode))
 
         self.delete_pair_order(token_1, token_2)
 

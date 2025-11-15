@@ -138,18 +138,18 @@ def main(method, in_params, out_params, dist_in_params, dist_out_params, hour4_w
     # Зададим пространство поиска наилучших параметров входа
     search_space = [('4h', w) for w in hour4_winds] + [('1h', w) for w in hour1_winds]
 
-    cointegrated_tokens = []
+    token_pairs = []
     with open(token_pairs_filename, 'r') as file:
         for line in file:
             a, b = line.strip().split()
-            cointegrated_tokens.append((a, b))
+            token_pairs.append((a, b))
 
     params_arr = []
 
     # --- Бектест по всем коинтегрированным парам токенов ---
-    for token_1, token_2 in tqdm(cointegrated_tokens):
+    for token_1, token_2 in tqdm(token_pairs):
         if data_filename is None:
-            filepath = f'./data/pair_backtest/{token_1}_{token_2}_lr_full.parquet'
+            filepath = f'./data/pair_backtest/{token_1}_{token_2}_{method}_full.parquet'
             try:
                 df = pl.read_parquet(filepath, low_memory=True, rechunk=True, use_pyarrow=True)
             except FileNotFoundError:
@@ -163,12 +163,12 @@ def main(method, in_params, out_params, dist_in_params, dist_out_params, hour4_w
 
     if save_to_file:
         with open(save_to_file, 'w') as file:
-            for t, p in zip(cointegrated_tokens, params_arr):
+            for t, p in zip(token_pairs, params_arr):
                 file.write(f'({p[0]:.2f}, "{t[0]}", "{t[1]}", "{p[2]}", {p[3]}, {p[4]}, {p[5]})\n')
 
 
 if __name__ == '__main__':
-    spread_method = 'lr'
+    spread_method = 'dist'
 
     in_params = (1.6, 1.8, 2.0, 2.25, 2.5)
     out_params = (0.0, 0.25, 0.5)
@@ -199,7 +199,7 @@ if __name__ == '__main__':
         min_order=min_order, max_order=max_order, verbose=0,
         data_filename=data_filename,
         token_pairs_filename=token_pairs_filename,
-        save_to_file='./data/pair_selection/ind_thresholds.txt'
+        save_to_file='./data/pair_selection/ind_thresholds_dist.txt'
         )
 
     db_manager.close()

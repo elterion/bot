@@ -44,7 +44,7 @@ def create_dfs(filename, spread_method, tf, winds, start_time, valid_time, end_t
 
         start_ts = int(datetime.timestamp(valid_time))
         spread_df = create_zscore_df(token_1, token_2, tick_df, agg_df, tf, winds,
-                                     min_order, start_ts, median_length=6)
+                                     min_order, start_ts, median_length=6, spr_method=spread_method)
 
         spread_df.write_parquet(f'./data/pair_backtest/{token_1}_{token_2}_{tf}_{spread_method}.parquet')
 
@@ -52,7 +52,7 @@ def create_dfs(filename, spread_method, tf, winds, start_time, valid_time, end_t
         pass
 
 if __name__ == '__main__':
-    spread_method = 'lr'
+    spread_method = 'dist'
     min_order = 40
 
     end_time = datetime(2025, 11, 12, 0, 0, tzinfo=ZoneInfo("Europe/Moscow"))

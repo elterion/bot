@@ -16,7 +16,7 @@ import json
 
 from zoneinfo import ZoneInfo
 from datetime import timedelta
-from bot.utils.pair_trading import get_lr_zscore
+from bot.utils.pair_trading import get_lr_zscore, get_dist_zscore
 from uuid import uuid4
 import math
 from functools import lru_cache
@@ -363,11 +363,10 @@ def main():
                 t1_curr = np.append(token_1_hist_price, t1_curr_data['avg_price'][0])
                 t2_curr = np.append(token_2_hist_price, t2_curr_data['avg_price'][0])
 
-                _, _, _, _, beta, zscore = get_lr_zscore(t1_med, t2_med, np.array([wind]))
-                _, _, _, _, beta_curr, zscore_curr = get_lr_zscore(t1_curr, t2_curr, np.array([wind]))
+                _, _, zscore = get_dist_zscore(t1_med, t2_med, np.array([wind]))
+                _, _, zscore_curr = get_dist_zscore(t1_curr, t2_curr, np.array([wind]))
                 z_score = zscore[0]
                 z_score_curr = zscore_curr[0]
-                beta = beta[0]
 
                 # ----- Проверяем условия для входа в позицию -----
                 if open_new_orders and pairs.height < max_pairs and check_tokens(token_1, token_2, pairs):

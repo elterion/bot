@@ -124,13 +124,13 @@ def grid_search(spread_df, token_1, token_2, method, start_time, end_time, min_t
 
     return top_params
 
-def main(method, in_params, out_params, dist_in_params, dist_out_params,
+def main(in_params, out_params, dist_in_params, dist_out_params,
          min_trades, n_top_params,
          verbose=0,
          token_pairs_filename=None, save_to_file=None):
 
     config = load_config('./bot/config/config.yaml')
-
+    method = config['spr_method']
     end_time = config['end_time']
     valid_time = config['valid_time']
     start_time = config['start_time']
@@ -172,8 +172,6 @@ def main(method, in_params, out_params, dist_in_params, dist_out_params,
 
 
 if __name__ == '__main__':
-    spr_method = 'dist'
-
     in_params = (1.6, 1.8, 2.0, 2.25, 2.5)
     out_params = (0.0, 0.25, 0.5)
     dist_in_params = (0, )
@@ -184,7 +182,7 @@ if __name__ == '__main__':
 
     token_pairs_filename = './data/token_pairs.txt'
 
-    main(spr_method, in_params, out_params, dist_in_params, dist_out_params,
+    main(in_params, out_params, dist_in_params, dist_out_params,
         min_trades, n_top_params, verbose=0,
         token_pairs_filename=token_pairs_filename,
         save_to_file='./data/pair_selection/ind_thresholds_dist.txt'

@@ -13,7 +13,8 @@ from bot.config.credentials import host, user, password, db_name
 db_params = {'host': host, 'user': user, 'password': password, 'dbname': db_name}
 db_manager = DBManager(db_params)
 
-from bot.core.exchange.http_api import ExchangeManager, BybitRestAPI
+# from bot.core.exchange.http_api import ExchangeManager, BybitRestAPI
+from bot.utils.files import load_config
 
 def base(token: str) -> str:
     return token.split('_')[0] if '_' in token else token
@@ -123,20 +124,24 @@ def grid_search(spread_df, token_1, token_2, method, start_time, end_time, min_t
 
     return top_params
 
-def main(method, in_params, out_params, dist_in_params, dist_out_params, hour4_winds, hour1_winds,
-         start_time, valid_time, end_time, min_trades, n_top_params, leverage,
-         min_order=40, max_order=50, n_iters=100_000, verbose=0,
-         data_filename=None, token_pairs_filename=None, save_to_file=None):
+def main(method, in_params, out_params, dist_in_params, dist_out_params,
+         min_trades, n_top_params,
+         verbose=0,
+         token_pairs_filename=None, save_to_file=None):
 
-    # Загружаем файл с данными
-    if data_filename:
-        df = pl.scan_parquet(data_filename)
-        all_cols = df.collect_schema().names()
-        cols_to_drop = [col for col in all_cols if '_spread_' in col]
-        df = df.drop(cols_to_drop).collect()
+    config = load_config('./bot/config/config.yaml')
+
+    end_time = config['end_time']
+    valid_time = config['valid_time']
+    start_time = config['start_time']
+    leverage = config['leverage']
+    min_order = config['min_order']
+    max_order = config['max_order']
+    search_space = config['search_space']
 
     # Зададим пространство поиска наилучших параметров входа
-    search_space = [('4h', w) for w in hour4_winds] + [('1h', w) for w in hour1_winds]
+    search_space = [('4h', np.int64(w)) for w in search_space['4h']] + \
+                        [('1h', np.int64(w)) for w in search_space['1h']]
 
     token_pairs = []
     with open(token_pairs_filename, 'r') as file:
@@ -148,12 +153,11 @@ def main(method, in_params, out_params, dist_in_params, dist_out_params, hour4_w
 
     # --- Бектест по всем коинтегрированным парам токенов ---
     for token_1, token_2 in tqdm(token_pairs):
-        if data_filename is None:
-            filepath = f'./data/pair_backtest/{token_1}_{token_2}_{method}_full.parquet'
-            try:
-                df = pl.read_parquet(filepath, low_memory=True, rechunk=True, use_pyarrow=True)
-            except FileNotFoundError:
-                continue
+        filepath = f'./data/pair_backtest/{token_1}_{token_2}_{method}_full.parquet'
+        try:
+            df = pl.read_parquet(filepath, low_memory=True, rechunk=True, use_pyarrow=True)
+        except FileNotFoundError:
+            continue
 
         # print(df)
         top_params = grid_search(df, token_1, token_2, method, valid_time, end_time, min_trades, n_top_params,
@@ -168,36 +172,20 @@ def main(method, in_params, out_params, dist_in_params, dist_out_params, hour4_w
 
 
 if __name__ == '__main__':
-    spread_method = 'dist'
+    spr_method = 'dist'
 
     in_params = (1.6, 1.8, 2.0, 2.25, 2.5)
     out_params = (0.0, 0.25, 0.5)
     dist_in_params = (0, )
     dist_out_params = (0, )
 
-    hour4_winds = np.array([12, 14, 16, 18, 24, 30])
-    hour1_winds = np.array([18, 24, 36, 48, 64, 72, 96, 120])
-
-    end_time = datetime(2025, 11, 12, 0, 0, tzinfo=ZoneInfo("Europe/Moscow"))
-    valid_time = datetime(2025, 10, 22, 0, 0, tzinfo=ZoneInfo("Europe/Moscow"))
-    start_time = datetime(2025, 10, 12, 0, 0, tzinfo=ZoneInfo("Europe/Moscow"))
-
     min_trades = 2
     n_top_params = 1 # Сколько лучших параметров печатать на экране
-    leverage = 2
-    min_order = 40
-    max_order = 50
-    dist_in = 0
 
     token_pairs_filename = './data/token_pairs.txt'
-    # data_filename = './data/train_data_dist_2.parquet'
-    data_filename = None
 
-    main(spread_method, in_params, out_params, dist_in_params, dist_out_params,
-        hour4_winds, hour1_winds,
-        start_time, valid_time, end_time, min_trades, n_top_params, leverage,
-        min_order=min_order, max_order=max_order, verbose=0,
-        data_filename=data_filename,
+    main(spr_method, in_params, out_params, dist_in_params, dist_out_params,
+        min_trades, n_top_params, verbose=0,
         token_pairs_filename=token_pairs_filename,
         save_to_file='./data/pair_selection/ind_thresholds_dist.txt'
         )

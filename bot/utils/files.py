@@ -1,10 +1,20 @@
 import os
 import re
 import yaml
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 def load_config(path):
     with open(path, 'r') as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+    config['start_time'] = datetime.strptime(config['start_time'], "%Y-%m-%d %H:%M"
+                                             ).replace(tzinfo=ZoneInfo('Europe/Moscow'))
+    config['valid_time'] = datetime.strptime(config['valid_time'], "%Y-%m-%d %H:%M"
+                                             ).replace(tzinfo=ZoneInfo('Europe/Moscow'))
+    config['end_time'] = datetime.strptime(config['end_time'], "%Y-%m-%d %H:%M"
+                                           ).replace(tzinfo=ZoneInfo('Europe/Moscow'))
+
+    return config
 
 def load_tokens_from_file(file_name):
     """

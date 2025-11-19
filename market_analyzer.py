@@ -119,64 +119,6 @@ def set_leverage_cached(demo, token, leverage):
     except Timeout:
         print(f'Проблема с изменением leverage для токена {token}.')
 
-def write_order_log(ts, ct, token_1, token_2, tf, wind, thresh_in, thresh_out, side, action,
-                    t1, t2, t1_bid_price, t1_ask_price, t2_bid_price, t2_ask_price,
-                    t1_bid_size, t1_ask_size, t2_bid_size, t2_ask_size, qty_1, qty_2,
-                    z_score, beta=None):
-    """
-    Запись сделки в лог файл.
-    ts - unix timestamp
-    ct - текущее время в формате datetime
-    token_1 - название токена_1
-    token_2 - название токена_2
-    tf - таймфрейм
-    wind - размер скользящего окна
-    t1 - исторические данные для токена_1
-    t2 - исторические данные для токена_2
-    t1_df_sec - датафрейм с последними записями токена_1
-    t2_df_sec - датафрейм с последними записями токена_1
-    z_score - z_score
-
-    На выходе ключи словаря t1_last и t2_last являются последними ценами
-    токенов, взятыми из t1_df_sec и t2_df_sec.
-
-    """
-
-
-    t1 = [round(x, 6) for x in t1.tolist()]
-    t2 = [round(x, 6) for x in t2.tolist()]
-    z_score = round(float(z_score), 2)
-    beta = round(float(beta), 2)
-
-    log = {'ts': ts,
-            'ct': ct,
-            'token_1': token_1[:-5],
-            'token_2': token_2[:-5],
-            'tf': tf,
-            'wind': wind,
-            'thresh_in': thresh_in,
-            'thresh_out': thresh_out,
-            'side': side,
-            'action': action,
-            't1': t1,
-            't2': t2,
-            't1_bid_price': t1_bid_price,
-            't1_ask_price': t1_ask_price,
-            't2_bid_price': t2_bid_price,
-            't2_ask_price': t2_ask_price,
-            't1_bid_size': t1_bid_size,
-            't1_ask_size': t1_ask_size,
-            't2_bid_size': t2_bid_size,
-            't2_ask_size': t2_ask_size,
-            'qty_1': qty_1,
-            'qty_2': qty_2,
-            'z_score': z_score,
-            'beta': beta
-           }
-    json_log = json.dumps(log, default=float, ensure_ascii=False)
-
-    with open('./logs/trades.jsonl', 'a', encoding='utf-8') as f:
-        f.write(json_log + '\n')
 
 def main():
     exchange = 'bybit'
@@ -202,11 +144,17 @@ def main():
     leverage = config['leverage']
     fee_rate = config['fee_rate']
 
+    spr_method = config['spr_method']
     tf = config['tf']
     wind = config['wind']
     thresh_in = config['thresh_in']
     thresh_out = config['thresh_out']
-    td = int(tf[0]) * wind * 2 # За сколько последних часов брать историю
+
+    # За сколько последних часов брать историю
+    if spr_method == 'dist':
+        td = int(tf[0]) * wind + 1
+    elif spr_method == 'lr' or spr_method == 'tsl':
+        td = int(tf[0]) * wind * 2 + 1
 
     update_positions_flag = False
 

@@ -162,6 +162,112 @@ class DBManager:
         with self.conn.cursor() as cursor:
             cursor.execute(query, (open_price_1, open_price_2, token_1, token_2))
 
+    def switch_order(self, old_token, new_token, qty, price, usdt):
+        """
+        Заменяет одну из сторон парной позиции новым токеном.
+        Автоматически определяет, в каком слоте (1 или 2) находился старый токен.
+        """
+        query = """
+            UPDATE pairs
+            SET
+                -- Обновляем первую пару, если old_token был там
+                token_1      = CASE WHEN token_1 = %(old)s THEN %(new)s ELSE token_1 END,
+                qty_1        = CASE WHEN token_1 = %(old)s THEN %(qty)s ELSE qty_1 END,
+                open_price_1 = CASE WHEN token_1 = %(old)s THEN %(price)s ELSE open_price_1 END,
+                usdt_1       = CASE WHEN token_1 = %(old)s THEN %(usdt)s ELSE usdt_1 END,
+                rpnl_1       = CASE WHEN token_1 = %(old)s THEN 0 ELSE rpnl_1 END,
+                upnl_1       = CASE WHEN token_1 = %(old)s THEN 0 ELSE upnl_1 END,
+                profit_1     = CASE WHEN token_1 = %(old)s THEN 0 ELSE profit_1 END,
+
+                -- Обновляем вторую пару, если old_token был там
+                token_2      = CASE WHEN token_2 = %(old)s THEN %(new)s ELSE token_2 END,
+                qty_2        = CASE WHEN token_2 = %(old)s THEN %(qty)s ELSE qty_2 END,
+                open_price_2 = CASE WHEN token_2 = %(old)s THEN %(price)s ELSE open_price_2 END,
+                usdt_2       = CASE WHEN token_2 = %(old)s THEN %(usdt)s ELSE usdt_2 END,
+                upnl_2       = CASE WHEN token_2 = %(old)s THEN 0 ELSE upnl_2 END,
+                profit_2     = CASE WHEN token_2 = %(old)s THEN 0 ELSE profit_2 END
+
+            WHERE token_1 = %(old)s OR token_2 = %(old)s;
+        """
+
+        with self.conn.cursor() as cursor:
+            cursor.execute(query, {
+                'old': old_token,
+                'new': new_token,
+                'qty': qty,
+                'price': price,
+                'usdt': usdt
+            })
+
+    def complete_half_order(self, orig_token_1, orig_token_2, token_to_close, close_price, close_fee):
+        with self.conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT token_1, token_2, created_at, side_1, side_2, qty_1, qty_2,
+                    open_price_1, open_price_2, usdt_1, usdt_2, rpnl_1, rpnl_2, leverage, mode
+                FROM pairs
+                WHERE token_1 = %s AND token_2 = %s
+            """, (orig_token_1, orig_token_2))
+
+            position = cursor.fetchone()
+
+        if not position:
+            raise Exception(f"Ордер не найден: {orig_token_1, orig_token_2}")
+
+        t1 = orig_token_1[:-5] if orig_token_1.endswith('_USDT') else orig_token_1
+        t2 = orig_token_2[:-5] if orig_token_2.endswith('_USDT') else orig_token_2
+
+        open_time = position[2]
+        side_1 = position[3]
+        side_2 = position[4]
+        qty_1 = position[5]
+        qty_2 = position[6]
+        open_price_1 = position[7]
+        open_price_2 = position[8]
+        open_fee_1 = position[11]
+        open_fee_2 = position[12]
+        leverage = position[13]
+        mode = position[14]
+
+        fee_1 = open_fee_1 + close_fee
+        fee_2 = open_fee_2 + close_fee
+
+        if side_1 == 'long':
+            pnl_1 = round(qty_1 * (close_price - open_price_1) + fee_1, 8)
+            pnl_2 = round(qty_2 * (open_price_2 - close_price) + fee_2, 8)
+        elif side_1 == 'short':
+            pnl_1 = round(qty_1 * (open_price_1 - close_price) + fee_1, 8)
+            pnl_2 = round(qty_2 * (close_price - open_price_2) + fee_2, 8)
+
+        profit = round(pnl_1 + pnl_2, 8)
+
+        Moscow_TZ = timezone(timedelta(hours=3))
+        close_time = datetime.now(Moscow_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+        if token_to_close == orig_token_1:
+            pnl_2 = 0
+            fee_2 = 0
+            profit = pnl_1
+            close_price_1 = close_price
+            close_price_2 = 0
+        elif token_to_close == orig_token_2:
+            pnl_1 = 0
+            fee_1 = 1
+            profit = pnl_2
+            close_price_1 = 0
+            close_price_2 = close_price
+
+        query = """
+            INSERT INTO trading_history (token_1, token_2, open_time, close_time, side_1, side_2, qty_1, qty_2,
+                open_price_1, open_price_2, close_price_1, close_price_2, fee_1, fee_2,
+                leverage, pnl_1, pnl_2, profit, mode)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+
+        with self.conn.cursor() as cursor:
+            cursor.execute(query, (t1, t2, open_time, close_time, side_1, side_2, qty_1, qty_2,
+                open_price_1, open_price_2, close_price_1, close_price_2, fee_1, fee_2,
+                leverage, pnl_1, pnl_2, profit, mode))
+
     def close_pair_order(self, token_1, token_2, side_1):
         """Обновляет статус ордера на 'closing' по ключу (token_1, token_2, side_1)"""
         query = """
@@ -380,6 +486,7 @@ class DBManager:
         interval: str = "5m",   # параметр агрегации
         start_date: datetime | None = None,
         end_date: datetime | None = None,
+        df_type: str = 'polars'
     ) -> pl.DataFrame:
         """
         Получает историю изменения ордербука по конкретной монете
@@ -437,7 +544,10 @@ class DBManager:
             columns = [desc[0] for desc in cur.description]
             data = cur.fetchall()
 
-        return pl.DataFrame(data, schema=columns, orient="row")
+        if df_type == 'polars':
+            return pl.DataFrame(data, schema=columns, orient="row")
+        elif df_type == 'raw':
+            return data
 
     def get_oldest_date_in_orderbook(self, token):
         query = """
@@ -513,7 +623,7 @@ class DBManager:
         """
         Получает все данные из заданной таблицы и возвращает их как pandas или polars DataFrame.
         """
-        assert df_type in ('pandas', 'polars'), "df_type should be 'pandas' or 'polars'"
+        assert df_type in ('raw', 'pandas', 'polars'), "df_type should be 'raw', 'pandas' or 'polars'"
 
         query = f"SELECT * FROM {table_name};"
         try:
@@ -523,7 +633,9 @@ class DBManager:
                 rows = cur.fetchall()
                 columns = [desc[0] for desc in cur.description]
                 # Преобразование в DataFrame
-                if df_type == 'pandas':
+                if df_type == 'raw':
+                    return rows
+                elif df_type == 'pandas':
                     df = pd.DataFrame(rows, columns=columns)
                     if 'id' in df.columns:
                         df = df.set_index('id')

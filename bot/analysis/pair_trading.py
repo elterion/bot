@@ -423,7 +423,7 @@ Profit: {profit:.2f}.')
                 qty_2 = _round(qty_2, dp_2)
 
             if etype == 1:
-                print(f"[ Open] {open_date}. {side_1} {qty_1} {token_1}, {side_2} {qty_2} {token_2}")
+                print(f"[ Open] {open_date}. {side_1} {round(qty_1, 6)} {token_1}, {side_2} {round(qty_2, 6)} {token_2}")
             elif etype == 2:
                 print(f"[Close] {close_date}. Profit: {total_profit:.2f}")
             elif etype == 3:

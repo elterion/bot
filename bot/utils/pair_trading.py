@@ -144,6 +144,148 @@ def get_zscore(df, token_1, token_2, winds, method):
     elif method == 'dist':
         means, stds, z_scores = get_dist_zscore(t1, t2, winds_np)
         return means, stds, z_scores
+    elif method == 'tls':
+        alpha, beta, zscore = get_lr_zscore(t1, t2, winds_np)
+        return alpha, beta, zscore
+
+@njit(cache=True)
+def get_tls_zscore(t1, t2, winds):
+    """
+    Рассчитывает симметричный Z-score на основе ортогональной регрессии (TLS).
+    Порядок подачи t1 и t2 больше не влияет на модуль значения Z-score.
+    """
+    n = t1.shape[0]
+    m = winds.shape[0]
+
+    alpha_full = np.full((m, n), np.nan, dtype=np.float64)
+    beta_full  = np.full((m, n), np.nan, dtype=np.float64)
+    z_full     = np.full((m, n), np.nan, dtype=np.float64)
+
+    spread_full = np.full((m, n), np.nan, dtype=np.float64)
+    mean_s_full = np.full((m, n), np.nan, dtype=np.float64)
+    std_s_full  = np.full((m, n), np.nan, dtype=np.float64)
+
+    max_w = 0
+    for j in range(m):
+        wj = winds[j]
+        if wj > max_w:
+            max_w = wj
+    if max_w <= 0:
+        return spread_full[:, -1], mean_s_full[:, -1], std_s_full[:, -1], alpha_full[:, -1], beta_full[:, -1], z_full[:, -1]
+
+    spread_bufs = np.zeros((m, max_w), dtype=np.float64)
+
+    sum_x  = np.zeros(m, dtype=np.float64)
+    sum_y  = np.zeros(m, dtype=np.float64)
+    sum_xx = np.zeros(m, dtype=np.float64)
+    sum_yy = np.zeros(m, dtype=np.float64) # <--- Добавлено для TLS
+    sum_xy = np.zeros(m, dtype=np.float64)
+
+    sum_s  = np.zeros(m, dtype=np.float64)
+    sum_ss = np.zeros(m, dtype=np.float64)
+
+    for i in range(n):
+        x = t2[i]
+        y = t1[i]
+
+        for j in range(m):
+            w = winds[j]
+            if w <= 0:
+                continue
+
+            # Обновляем суммы
+            sum_x[j]  += x
+            sum_y[j]  += y
+            sum_xx[j] += x * x
+            sum_yy[j] += y * y # <--- Добавлено
+            sum_xy[j] += x * y
+
+            # Удаляем старые элементы
+            if i >= w:
+                x_old = t2[i - w]
+                y_old = t1[i - w]
+                sum_x[j]  -= x_old
+                sum_y[j]  -= y_old
+                sum_xx[j] -= x_old * x_old
+                sum_yy[j] -= y_old * y_old # <--- Добавлено
+                sum_xy[j] -= x_old * y_old
+
+            if i >= w - 1:
+                mean_x = sum_x[j] / w
+                mean_y = sum_y[j] / w
+
+                # Считаем дисперсии и ковариацию
+                var_x = (sum_xx[j] / w) - mean_x * mean_x
+                var_y = (sum_yy[j] / w) - mean_y * mean_y # <--- Добавлено
+                cov_xy = (sum_xy[j] / w) - mean_x * mean_y
+
+                # --- Расчет Beta по методу TLS (Orthogonal Regression) ---
+                # Формула: решает квадратное уравнение для минимизации перпендикулярных отрезков
+
+                # Обработка деления на ноль (если cov_xy = 0)
+                if abs(cov_xy) < 1e-12:
+                     # Если ковариация 0, наклон либо 0 (горизонт), либо inf (вертикаль)
+                     # в зависимости от того, чья дисперсия больше
+                     beta = 0.0
+                else:
+                    delta = var_y - var_x
+                    # Основная формула TLS
+                    beta = (delta + np.sqrt(delta**2 + 4 * cov_xy**2)) / (2 * cov_xy)
+
+                alpha = mean_y - beta * mean_x
+
+                beta_full[j, i] = beta
+                alpha_full[j, i] = alpha
+
+                # --- Расчет ортогонального спреда ---
+                # Важно: делим на sqrt(1 + beta^2) для получения реального расстояния
+                norm_factor = np.sqrt(1.0 + beta * beta)
+                s = (y - (alpha + beta * x)) / norm_factor
+
+                # Дальше логика Rolling Z-score не меняется, так как мы уже получили "правильный" s
+                pos = i % w
+                if i >= w:
+                    s_old = spread_bufs[j, pos]
+                    sum_s[j]  -= s_old
+                    sum_ss[j] -= s_old * s_old
+
+                spread_bufs[j, pos] = s
+                sum_s[j]  += s
+                sum_ss[j] += s * s
+
+                mean_s = sum_s[j] / w
+                num = sum_ss[j] - w * mean_s * mean_s
+                denom = w - 1
+
+                eps = 1e-12 * (1.0 + abs(sum_ss[j]))
+                if num < 0.0 and num > -eps:
+                    num = 0.0
+
+                if num >= 0.0 and np.isfinite(num) and denom > 0:
+                    var_s_sample = num / denom
+                    if var_s_sample <= 0.0:
+                        std_s = 0.0
+                    else:
+                        std_s = np.sqrt(var_s_sample)
+
+                    if std_s > 0.0:
+                        z = (s - mean_s) / std_s
+                    else:
+                        z = 0.0
+
+                    mean_s_full[j, i] = mean_s
+                    std_s_full[j, i]  = std_s
+                    z_full[j, i]      = z
+                else:
+                    mean_s_full[j, i] = mean_s
+                    std_s_full[j, i]  = np.nan
+                    z_full[j, i]      = np.nan
+
+                spread_full[j, i] = s
+            else:
+                pass
+
+    return spread_full[:, -1], mean_s_full[:, -1], std_s_full[:, -1], alpha_full[:, -1], beta_full[:, -1], z_full[:, -1]
 
 @njit(cache=True)
 def get_lr_zscore(t1, t2, winds):
@@ -402,6 +544,8 @@ def calculate_z_score(start_ts: int,
             spread, mean_spread, spread_std, alpha, beta, zscore = get_lr_zscore(t1_arr_med, t2_arr_med, winds)
         elif spr_method == 1:
             mean_spread, spread_std, zscore = get_dist_zscore(t1_arr_med, t2_arr_med, winds)
+        elif spr_method == 2:
+            spread, mean_spread, spread_std, alpha, beta, zscore = get_tls_zscore(t1_arr_med, t2_arr_med, winds)
 
         ts_arr[i] = tss[i]
         # spread_arr[i] = spread
@@ -412,7 +556,12 @@ def calculate_z_score(start_ts: int,
     return ts_arr, spr_mean_arr, spr_std_arr, z_score_arr
 
 def create_zscore_df(token_1, token_2, sec_df, agg_df, tf, winds, min_order, start_ts, median_length, spr_method):
-    spr_method = 0 if spr_method == 'lr' else 1
+    if spr_method == 'lr':
+        spr_method = 0
+    elif spr_method == 'dist':
+        spr_method = 1
+    elif spr_method == 'tls':
+        spr_method = 2
 
     # --- Перевод polars в numpy ---
     tss = sec_df['ts'].to_numpy()
@@ -554,7 +703,6 @@ def get_thresholds():
                 tuple_data = ast.literal_eval(line)
                 data.append(tuple_data)
     return data
-
 
 def check_pos(name, pairs):
     token_1, token_2, *_ = name.split('_')

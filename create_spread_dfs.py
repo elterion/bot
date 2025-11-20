@@ -97,7 +97,7 @@ def clean_files(search_space, token_pairs, method):
 if __name__ == '__main__':
     config = load_config('./bot/config/config.yaml')
 
-    spread_method = config['spr_method']
+    spread_method = config['backtest_spr_method']
     min_order = config['min_order']
 
     end_time = config['end_time']

@@ -275,7 +275,7 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
                     elif long_in_min_value and z < long_in_min_value:
                         long_in_min_value = z
                     # Если z_score откатывается на dist от максимума, разрешаем открытие позиции
-                    elif long_in_min_value and z > long_in_min_value + dist_in:
+                    elif long_in_min_value and z > long_in_min_value + dist_in and z < thresh_low_in:
                         signal = SIG_LONG_OPEN
                         long_in_min_value = 0
                         # print('Входим в лонг', time_arr[i], z)
@@ -289,7 +289,7 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
                     elif short_in_max_value and z > short_in_max_value:
                         short_in_max_value = z
                     # Если z_score откатывается на dist от максимума, разрешаем открытие позиции
-                    elif short_in_max_value and z < short_in_max_value - dist_in:
+                    elif short_in_max_value and z < short_in_max_value - dist_in and z > thresh_high_in:
                         short_in_max_value = 0
                         signal = SIG_SHORT_OPEN
                         # print('Входим в шорт', time_arr[i], z)
@@ -310,7 +310,7 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
                 elif short_out_min_value and z < short_out_min_value:
                     short_out_min_value = z
                 # Если спред откатывается на dist_out от минимума
-                elif short_out_min_value and z > thresh_low_out + dist_out:
+                elif short_out_min_value and z > short_out_min_value + dist_out and z < thresh_low_out:
                     signal = SIG_SHORT_CLOSE
                     reason = REASON_THRESHOLD
                     short_out_min_value = 0
@@ -330,7 +330,7 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
                 elif long_out_max_value and z > long_out_max_value:
                     long_out_max_value = z
                 # Если спред откатывается на dist_out от максимума
-                elif long_out_max_value and z < thresh_high_out - dist_out:
+                elif long_out_max_value and z < long_out_max_value - dist_out and z > thresh_high_out:
                     signal = SIG_LONG_CLOSE
                     reason = REASON_THRESHOLD
                     long_out_max_value = 0

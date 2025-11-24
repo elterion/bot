@@ -100,7 +100,7 @@ def get_hist_df(postgre_manager, start_time):
 
     return hour_4_df, hour_1_df
 
-def calculate_profit(open_price, close_price, n_coins, side, fee_rate=0.00055):
+def calculate_profit(open_price, close_price, n_coins, side, fee_rate=0.001):
     usdt_open = n_coins * open_price
     open_fee = usdt_open * fee_rate
     usdt_close = n_coins * close_price

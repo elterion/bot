@@ -154,6 +154,9 @@ def get_tls_zscore(t1, t2, winds):
     Рассчитывает симметричный Z-score на основе ортогональной регрессии (TLS).
     Порядок подачи t1 и t2 больше не влияет на модуль значения Z-score.
     """
+    t1 = np.log(t1)
+    t2 = np.log(t2)
+
     n = t1.shape[0]
     m = winds.shape[0]
 
@@ -289,6 +292,9 @@ def get_tls_zscore(t1, t2, winds):
 
 @njit(cache=True)
 def get_lr_zscore(t1, t2, winds):
+    t1 = np.log(t1)
+    t2 = np.log(t2)
+
     n = t1.shape[0]
     m = winds.shape[0]
 
@@ -602,7 +608,7 @@ def get_qty(
         beta: float,
         coin_information: dict,
         total_usdt_amount: float = 100.0,
-        fee_rate: float = 0.00055,
+        fee_rate: float = 0.001,
         std_1: float | None = None,
         std_2: float | None = None,
         method: 'str' = 'beta',
@@ -708,7 +714,7 @@ def check_pos(name, pairs):
     token_1, token_2, *_ = name.split('_')
     return any(a == token_1 and b == token_2 for a, b, _ in pairs)
 
-def calculate_profit(open_price, close_price, n_coins, side, fee_rate=0.00055):
+def calculate_profit(open_price, close_price, n_coins, side, fee_rate=0.001):
     usdt_open = n_coins * open_price
     open_fee = usdt_open * fee_rate
 
@@ -791,7 +797,8 @@ def place_demo_order(tokens_in_position, pairs, current_orders, trades,
                 print(f'{time} [{pos_side} close] {act_1} {qty_1} {token_1} for {t1_price}; {act_2} {qty_2} {token_2} for {t2_price}; z_score: {z_score:.2f}')
 
 def run_single_tf_backtest(main_df, tf, wind, in_, out_, leverage, max_pairs, min_order_size, max_order_size,
-                           fee_rate, start_time, end_time, sl_ratio, coin_information, verbose=False):
+                           qty_method, fee_rate, start_time, end_time, sl_ratio,
+                           coin_information, force_close=False, verbose=False):
     tokens_in_position = []
     pairs = []
     current_orders = {}
@@ -817,7 +824,9 @@ def run_single_tf_backtest(main_df, tf, wind, in_, out_, leverage, max_pairs, mi
             z_score = row[f'{token_1}_{token_2}_z_score']
 
             # ----- Проверяем условия для входа в позицию -----
-            if (len(pairs) < max_pairs and token_1 not in tokens_in_position and token_2 not in tokens_in_position):
+            if (len(pairs) < max_pairs and
+                token_1 not in tokens_in_position and
+                token_2 not in tokens_in_position):
 
                 # --- Входим в лонг ---
                 if z_score < low_in:
@@ -826,7 +835,7 @@ def run_single_tf_backtest(main_df, tf, wind, in_, out_, leverage, max_pairs, mi
                     t1_vol = row[f'{token_1}_ask_size']
                     t2_vol = row[f'{token_2}_bid_size']
                     qty_1, qty_2 = get_qty(token_1, token_2, t1_price, t2_price, None, coin_information, 2 * max_order_size * leverage,
-                              method='usdt_neutral')
+                              method=qty_method)
                     place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
                                 'open', 'long', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
                                 tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, verbose=verbose)
@@ -838,7 +847,7 @@ def run_single_tf_backtest(main_df, tf, wind, in_, out_, leverage, max_pairs, mi
                     t1_vol = row[f'{token_1}_bid_size']
                     t2_vol = row[f'{token_2}_ask_size']
                     qty_1, qty_2 = get_qty(token_1, token_2, t1_price, t2_price, None, coin_information, 2 * max_order_size * leverage,
-                              method='usdt_neutral')
+                              method=qty_method)
                     place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
                                 'open', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
                                 tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, verbose=verbose)
@@ -866,7 +875,8 @@ def run_single_tf_backtest(main_df, tf, wind, in_, out_, leverage, max_pairs, mi
                 qty_2 = current_orders[(token_1, token_2)]['qty_2']
                 place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
                             'close', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
-                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, reason=1, verbose=verbose)
+                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, reason=1,
+                                verbose=verbose)
 
             # --- Проверка стоп-лосса ---
             if (token_1, token_2, 'long') in pairs:
@@ -919,6 +929,34 @@ def run_single_tf_backtest(main_df, tf, wind, in_, out_, leverage, max_pairs, mi
                                 'close', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
                                 tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, reason=2, verbose=verbose)
 
+    if verbose:
+        for pair, info in current_orders.items():
+            print(pair, info['time'])
+
+    if force_close:
+        row = main_df[-1]
+        time = row['time'][0]
+        orders_to_close = current_orders.copy()
+
+        for pair, info in orders_to_close.items():
+            z_score = row[f'{token_1}_{token_2}_z_score'][0]
+            token_1 = pair[0]
+            token_2 = pair[1]
+            pos_side = info['pos_side']
+            qty_1 = info['qty_1']
+            qty_2 = info['qty_2']
+            t1_vol = 1_000_000
+            t2_vol = 1_000_000
+            t1_price = row[f'{token_1}_bid_price'][0] if pos_side == 'long' else row[f'{token_1}_ask_price'][0]
+            t2_price = row[f'{token_2}_ask_price'][0] if pos_side == 'long' else row[f'{token_2}_bid_price'][0]
+
+            place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                            'close', pos_side, qty_1, qty_2, t1_price, t2_price,
+                            t1_vol, t2_vol, None, z_score, tf, wind, in_, out_, fee_rate,
+                            min_order_size, max_order_size, leverage, reason=1,
+                            verbose=verbose)
+
+
     trades_df = pl.DataFrame(trades)
     try:
         trades_df = trades_df.with_columns(
@@ -933,7 +971,7 @@ def run_single_tf_backtest(main_df, tf, wind, in_, out_, leverage, max_pairs, mi
         return None
 
 def run_single_tf_backtest_reverse(main_df, tf, wind, in_, out_, dist_in, dist_out, max_pairs, leverage,
-                                   min_order_size, max_order_size, fee_rate, start_time, end_time,
+                                   min_order_size, max_order_size, qty_method, fee_rate, start_time, end_time,
                                    sl_ratio, coin_information, reverse_in=True, reverse_out=False,
                                    verbose=False):
     tokens_in_position = []
@@ -1026,7 +1064,7 @@ def run_single_tf_backtest_reverse(main_df, tf, wind, in_, out_, dist_in, dist_o
                     t1_vol = row[f'{token_1}_ask_size']
                     t2_vol = row[f'{token_2}_bid_size']
                     qty_1, qty_2 = get_qty(token_1, token_2, t1_price, t2_price, None, coin_information, 2 * max_order_size * leverage,
-                              method='usdt_neutral')
+                              method=qty_method)
                     place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
                                 'open', 'long', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
                                 tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, verbose=verbose)
@@ -1039,7 +1077,7 @@ def run_single_tf_backtest_reverse(main_df, tf, wind, in_, out_, dist_in, dist_o
                     t1_vol = row[f'{token_1}_bid_size']
                     t2_vol = row[f'{token_2}_ask_size']
                     qty_1, qty_2 = get_qty(token_1, token_2, t1_price, t2_price, None, coin_information, 2 * max_order_size * leverage,
-                              method='usdt_neutral')
+                              method=qty_method)
                     place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
                                 'open', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
                                 tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, verbose=verbose)
@@ -1123,6 +1161,10 @@ def run_single_tf_backtest_reverse(main_df, tf, wind, in_, out_, dist_in, dist_o
                     place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
                                 'close', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
                                 tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, reason=2, verbose=verbose)
+
+    if verbose:
+        for pair, info in current_orders.items():
+            print(pair, info['time'])
 
     trades_df = pl.DataFrame(trades)
     trades_df = trades_df.with_columns(

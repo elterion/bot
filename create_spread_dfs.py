@@ -107,7 +107,7 @@ if __name__ == '__main__':
     search_space = config['search_space']
     n_tf = len(search_space)
 
-    filename = './data/token_pairs.txt' # Файл, в котором указаны пары токенов
+    filename = config['token_pairs_file']
 
     token_pairs = []
     with open(filename, 'r') as file:
@@ -120,5 +120,5 @@ if __name__ == '__main__':
         create_dfs(token_pairs, spread_method, tf, winds, start_time, valid_time, end_time, min_order)
     db_manager.close()
 
-    merge_files(n_tf, token_pairs, spread_method, valid_time, end_time)
-    clean_files(search_space, token_pairs, spread_method)
+    # merge_files(n_tf, token_pairs, spread_method, valid_time, end_time)
+    # clean_files(search_space, token_pairs, spread_method)

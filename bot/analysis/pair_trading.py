@@ -18,6 +18,7 @@ POS_NONE, POS_LONG, POS_SHORT = 0, 1, 2
 REASON_NONE, REASON_THRESHOLD, REASON_STOPLOSS, REASON_LIQ = 0, 1, 2, 3
 LIQ_NONE, LIQ_LONG, LIQ_SHORT = 0, 1, 2  # для внутренней логики
 EV_TYPE_OPEN, EV_TYPE_CLOSE, EV_TYPE_SL, EV_TYPE_LIQ = 1, 2, 3, 4
+USDT_NEUT, VOL_NEUT = 0, 1
 
 try:
     # Проверяем, есть ли IPython и работаем ли мы в ноутбуке
@@ -39,12 +40,11 @@ def _round(value, dp):
 
 @njit(fastmath=True, cache=True)
 def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
-                  dp_1, dp_2, ps_1, ps_2, thresh_low_in, thresh_low_out,
-             thresh_high_in, thresh_high_out, long_possible, short_possible,
-             dist_in, dist_out,
-             balance, order_size, fee_rate,  stop_loss_std, sl_method,
-             sl_seconds=0,
-             leverage=1):
+            dp_1, dp_2, ps_1, ps_2, thresh_low_in, thresh_low_out,
+            thresh_high_in, thresh_high_out, long_possible, short_possible,
+            dist_in, dist_out, balance, order_size, qty_method, std_1, std_2,
+            fee_rate,  stop_loss_std, sl_method,
+            sl_seconds=0, leverage=1):
 
     n = z_score.shape[0]
     total_balance = balance
@@ -158,8 +158,16 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
             open_time = time_arr[i]
             open_price_1 = ask_1[i]
             open_price_2 = bid_2[i]
-            qty_1 = _round(leverage * order_size / (1.0 + 2.0 * fee_rate) / open_price_1, dp_1)
-            qty_2  = _round(leverage * order_size / (1.0 + 2.0 * fee_rate) / open_price_2, dp_2)
+            if qty_method == USDT_NEUT:
+                qty_1 = _round(leverage * order_size / (1.0 + 2.0 * fee_rate) / open_price_1, dp_1)
+                qty_2  = _round(leverage * order_size / (1.0 + 2.0 * fee_rate) / open_price_2, dp_2)
+            elif qty_method == VOL_NEUT:
+                c_eff = 2 * order_size * leverage / (1.0 + 4.0 * fee_rate)
+                d1 = c_eff * std_2 / (std_1 + std_2)
+                d2 = c_eff * std_1 / (std_1 + std_2)
+
+                qty_1 = _round(d1 / open_price_1, dp_1)
+                qty_2 = _round(d2 / open_price_2, dp_2)
             pos_side = POS_LONG
             signal = SIG_NONE
 
@@ -171,8 +179,16 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
             open_time = time_arr[i]
             open_price_1 = bid_1[i]
             open_price_2 = ask_2[i]
-            qty_1 = _round(leverage * order_size / (1.0 + 2.0 * fee_rate) / open_price_1, dp_1)
-            qty_2 = _round(leverage * order_size / (1.0 + 2.0 * fee_rate) / open_price_2, dp_2)
+            if qty_method == USDT_NEUT:
+                qty_1 = _round(leverage * order_size / (1.0 + 2.0 * fee_rate) / open_price_1, dp_1)
+                qty_2 = _round(leverage * order_size / (1.0 + 2.0 * fee_rate) / open_price_2, dp_2)
+            elif qty_method == VOL_NEUT:
+                c_eff = 2 * order_size * leverage / (1.0 + 4.0 * fee_rate)
+                d1 = c_eff * std_2 / (std_1 + std_2)
+                d2 = c_eff * std_1 / (std_1 + std_2)
+
+                qty_1 = _round(d1 / open_price_1, dp_1)
+                qty_2 = _round(d2 / open_price_2, dp_2)
             pos_side = POS_SHORT
             signal = SIG_NONE
 
@@ -353,10 +369,11 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
     return out, events
 
 def backtest(df, token_1, token_2, dp_1, dp_2, ps_1, ps_2, thresh_low_in, thresh_low_out,
-             thresh_high_in, thresh_high_out, long_possible, short_possible,
-             balance, order_size, fee_rate,  stop_loss_std, sl_method=None,
-             sl_seconds=0, leverage=1, dist_in=0, dist_out=0,
-             verbose=False):
+            thresh_high_in, thresh_high_out, long_possible, short_possible,
+            balance, order_size, qty_method, std_1, std_2,
+            fee_rate,  stop_loss_std, sl_method=None,
+            sl_seconds=0, leverage=1, dist_in=0, dist_out=0,
+            verbose=False):
     time_arr = df['ts'].to_numpy()
     z = df["z_score"].to_numpy()
     bid_1 = df[f"{token_1}_bid_price"].to_numpy()
@@ -365,6 +382,10 @@ def backtest(df, token_1, token_2, dp_1, dp_2, ps_1, ps_2, thresh_low_in, thresh
     ask_2 = df[f"{token_2}_ask_price"].to_numpy()
 
     sl_map = {None: 0, 'counter': 1, 'leave': 2}
+    qty_map = {'usdt_neutral': USDT_NEUT, 'vol_neutral': VOL_NEUT}
+
+    if qty_method == 'vol_neutral' and (std_1 is None or std_2 is None):
+        raise Exception('При использовании vol_neutral необходимо задать std_1 и std_2')
 
     res, events = backtest_fast(time_arr, z, bid_1, ask_1, bid_2, ask_2,
             dp_1, dp_2, ps_1, ps_2,
@@ -372,7 +393,8 @@ def backtest(df, token_1, token_2, dp_1, dp_2, ps_1, ps_2, thresh_low_in, thresh
             thresh_low_out=thresh_low_out, thresh_high_out=thresh_high_out,
             long_possible=long_possible, short_possible=short_possible,
             dist_in=dist_in, dist_out=dist_out,
-            balance=balance, order_size=order_size, fee_rate=fee_rate,
+            balance=balance, order_size=order_size, qty_method=qty_map[qty_method],
+            std_1=std_1, std_2=std_2, fee_rate=fee_rate,
             stop_loss_std=stop_loss_std, sl_method=sl_map[sl_method],
             sl_seconds=sl_seconds,
             leverage=leverage)

@@ -515,7 +515,6 @@ def calculate_z_score(start_ts: int,
     nrows = tss.shape[0]
     n_winds = winds.shape[0]
     ts_arr = np.full(nrows, np.nan)
-    # spread_arr = np.full((nrows, n_winds), np.nan)
     spr_mean_arr = np.full((nrows, n_winds), np.nan)
     spr_std_arr = np.full((nrows, n_winds), np.nan)
     z_score_arr = np.full((nrows, n_winds), np.nan)
@@ -527,20 +526,13 @@ def calculate_z_score(start_ts: int,
 
         t1_price = price1[i - median_length: i]
         t2_price = price2[i - median_length: i]
-        t1_size = size1[i - median_length: i]
-        t2_size = size2[i - median_length: i]
-
-        if np.sum(t1_price * t1_size > min_order) < 3 or np.sum(t2_price * t2_size > min_order) < 3:
-            continue
-
         t1_med = np.median(t1_price)
         t2_med = np.median(t2_price)
 
         # Выберем из агрегированных цен только те, которые были до текущего момента
-        n_elems = hist_ts[hist_ts < tss[i]][:-1].shape[0]
-        tail = hist_ts.shape[0] - n_elems
-        t1_hist = hist_t1[:-tail]
-        t2_hist = hist_t2[:-tail]
+        mask = hist_ts < tss[i]
+        t1_hist = hist_t1[mask]
+        t2_hist = hist_t2[mask]
 
         # Сформируем массивы, в которых к историческим данным в конец добавим текущую медианную цену, и посчитаем z_score
         t1_arr_med = np.append(t1_hist, t1_med)
@@ -554,7 +546,6 @@ def calculate_z_score(start_ts: int,
             spread, mean_spread, spread_std, alpha, beta, zscore = get_tls_zscore(t1_arr_med, t2_arr_med, winds)
 
         ts_arr[i] = tss[i]
-        # spread_arr[i] = spread
         spr_mean_arr[i] = mean_spread
         spr_std_arr[i] = spread_std
         z_score_arr[i] = zscore

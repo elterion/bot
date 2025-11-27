@@ -64,7 +64,7 @@ class DBManager:
             cursor.executemany(sql, records)
 
     def add_pair_order(self, token_1, token_2, created_at, mode, side_1, side_2, qty_1, qty_2,
-                       price_1, price_2, usdt_1, usdt_2, leverage, status):
+                       price_1, price_2, usdt_1, usdt_2, fixed_mean, fixed_std, leverage, status):
         """Добавляет новый ордер в таблицу pairs"""
 
         # Если created_at не передан, используем текущее время
@@ -75,13 +75,13 @@ class DBManager:
         query = """
         INSERT INTO pairs (token_1, token_2, created_at, mode, side_1, side_2, qty_1, qty_2,
         open_price_1, open_price_2, usdt_1, usdt_2, leverage, rpnl_1, rpnl_2, upnl_1, upnl_2,
-        profit_1, profit_2, profit, status)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, 0, 0, 0, 0, 0, %s)
+        profit_1, profit_2, profit, status, fixed_mean, fixed_std)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, 0, 0, 0, 0, 0, %s, %s, %s)
         """
 
         with self.conn.cursor() as cursor:
             cursor.execute(query, (token_1, token_2, created_at, mode, side_1, side_2, qty_1, qty_2,
-                                   price_1, price_2, usdt_1, usdt_2, leverage, status))
+                                   price_1, price_2, usdt_1, usdt_2, leverage, status, fixed_mean, fixed_std))
 
     def update_pairs(self, pairs_data):
         """

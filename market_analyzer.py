@@ -240,6 +240,8 @@ def main():
                 )
 
             pairs = postgre_manager.get_table('pairs', df_type='polars')
+            stop_list = postgre_manager.get_table('stop_list', df_type='polars')
+
             active_orders = pairs.filter(pl.col('status') == 'active')
 
             # --- Секундный датафрейм для подсчёта среднего значения ---
@@ -258,6 +260,13 @@ def main():
                 token_1 = t1_name + '_USDT'
                 token_2 = t2_name + '_USDT'
                 z_score = 0
+
+                # --- Проверяем пару на наличие в стоп-листе ---
+                if stop_list.filter(
+                        ((pl.col('token_1') == token_1) & (pl.col('token_2') == token_2)) |
+                        ((pl.col('token_1') == token_2) & (pl.col('token_2') == token_1))
+                    ).height > 0:
+                    continue
 
                 # --- Обновляем открытые пары и текущие ордеры ---
                 if update_positions_flag:

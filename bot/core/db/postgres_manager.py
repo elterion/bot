@@ -363,26 +363,26 @@ class DBManager:
 
     def add_data_to_zscore_history(self, data):
         """
-        Добавляет список записей в таблицу
-        data: список кортежей в формате (ts, exchange, token_1, token_2, z_score, profit)
+        Добавляет список записей в таблицу zscore_history
+        data: список кортежей в формате (ts, exchange, token_1, token_2, profit, z_score, fixed_z_score, spread)
         """
         with self.conn.cursor() as cur:
             # Преобразуем данные в нужный формат
             records = [
-                (ts, exchange, token_1, token_2, profit, z_score)
-                for (ts, exchange, token_1, token_2, profit, z_score) in data
+                (ts, exchange, token_1, token_2, profit, z_score, fixed_z_score, spread)
+                for (ts, exchange, token_1, token_2, profit, z_score, fixed_z_score, spread) in data
             ]
 
             # Выполняем массовую вставку
             cur.executemany(
-                "INSERT INTO zscore_history (ts, exchange, token_1, token_2, profit, z_score) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
+                "INSERT INTO zscore_history (ts, exchange, token_1, token_2, profit, z_score, fixed_z_score, spread) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
                 records
             )
 
     def get_zscore_history(self, token_1, token_2, start_ts, end_ts):
         query = """
-            SELECT ts, time, exchange, token_1, token_2, profit, z_score
+            SELECT ts, time, exchange, token_1, token_2, profit, z_score, fixed_z_score, spread
             FROM zscore_history
             WHERE token_1 = %s
               AND token_2 = %s
@@ -398,7 +398,19 @@ class DBManager:
             rows = cur.fetchall()
             colnames = [desc[0] for desc in cur.description]
 
-        return pl.DataFrame(rows, schema=colnames, orient="row")
+        schema = {
+            'ts': pl.Int64,
+            'time': pl.Datetime,  # или pl.String, в зависимости от формата
+            'exchange': pl.String,
+            'token_1': pl.String,
+            'token_2': pl.String,
+            'profit': pl.Float64,
+            'z_score': pl.Float64,
+            'fixed_z_score': pl.Float64,
+            'spread': pl.Float64
+        }
+
+        return pl.DataFrame(rows, schema=schema, orient="row")
 
     def update_tick_ob(self, rows):
         query = """

@@ -241,7 +241,6 @@ def main():
 
             pairs = postgre_manager.get_table('pairs', df_type='polars')
             stop_list = postgre_manager.get_table('stop_list', df_type='polars')
-
             active_orders = pairs.filter(pl.col('status') == 'active')
 
             # --- Секундный датафрейм для подсчёта среднего значения ---
@@ -324,7 +323,7 @@ def main():
 
                 spread_mean, spread_std, zscore = get_dist_zscore(t1_med, t2_med, np.array([wind]))
                 _, _, zscore_curr = get_dist_zscore(t1_curr, t2_curr, np.array([wind]))
-                spread_mean, spread_std, z_score = zscore[0], spread_mean[0], spread_std[0]
+                spread_mean, spread_std, z_score = spread_mean[0], spread_std[0], zscore[0]
                 z_score_curr = zscore_curr[0]
 
                 # ----- Проверяем условия для входа в позицию -----
@@ -364,7 +363,18 @@ def main():
                     curr_profit_2 = calculate_profit(t2_op, t2_tick_df['avg_price'].median(), q2, side_2)
 
                     curr_profit = curr_profit_1 + curr_profit_2
-                    zscore_arr.append((ts, 'bybit', token_1, token_2, curr_profit, z_score))
+
+                    curr_spread = np.log(t1_curr_data['avg_price'][0]) - np.log(t2_curr_data['avg_price'][0])
+                    curr_pair = pairs.filter(
+                            (pl.col('token_1') == token_1) & (pl.col('token_2') == token_2)
+                        )
+                    fixed_mean = curr_pair['fixed_mean'][0]
+                    fixed_std = curr_pair['fixed_std'][0]
+                    fixed_z_score = (curr_spread - fixed_mean) / fixed_std
+
+                    zscore_arr.append((ts, 'bybit', token_1, token_2, curr_profit, z_score, fixed_z_score, curr_spread))
+
+                    # ts, exchange, token_1, token_2, profit, z_score, fixed_z_score, spread
 
                     if curr_profit < -sl_profit_ratio * 2 * max_order:
                         print(f'{ct} {token_1} - {token_2} STOP-LOSS by profit!')

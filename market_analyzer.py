@@ -25,7 +25,7 @@ def round_down(value: float, dp: float):
     return round(math.floor(value / dp) * dp, 6)
 
 def open_position(token_1, token_2, mode, t1_data, t2_data, side_1, side_2, leverage,
-                  min_order, max_order, fee_rate, coin_information, db_manager):
+                  min_order, max_order, fee_rate, spread_mean, spread_std, coin_information, db_manager):
     ct = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     t1_qty_step = get_step_info(coin_information, token_1, 'bybit_linear', 'bybit_linear')
     t2_qty_step = get_step_info(coin_information, token_2, 'bybit_linear', 'bybit_linear')
@@ -57,7 +57,8 @@ def open_position(token_1, token_2, mode, t1_data, t2_data, side_1, side_2, leve
         usdt_2 = qty_2 * price_2
 
         db_manager.add_pair_order(token_1, token_2, created_at, mode, side_1, side_2, qty_1, qty_2,
-                   price_1, price_2, usdt_1 / leverage, usdt_2 / leverage, leverage=leverage, status='opening')
+                   price_1, price_2, usdt_1 / leverage, usdt_2 / leverage,
+                   spread_mean, spread_std, leverage=leverage, status='opening')
 
         act_1 = 'buy' if side_1 == 'long' else 'sell'
         act_2 = 'buy' if side_2 == 'long' else 'sell'
@@ -121,7 +122,6 @@ def set_leverage_cached(demo, token, leverage):
 
 
 def main():
-    exchange = 'bybit'
     config = load_config('./bot/config/config.yaml')
     mode = config['mode']
 
@@ -149,6 +149,8 @@ def main():
     wind = config['wind']
     thresh_in = config['thresh_in']
     thresh_out = config['thresh_out']
+
+    sl_profit_ratio = config['sl_profit_ratio']
 
     # За сколько последних часов брать историю
     if spr_method == 'dist':
@@ -311,9 +313,9 @@ def main():
                 t1_curr = np.append(token_1_hist_price, t1_curr_data['avg_price'][0])
                 t2_curr = np.append(token_2_hist_price, t2_curr_data['avg_price'][0])
 
-                _, _, zscore = get_dist_zscore(t1_med, t2_med, np.array([wind]))
+                spread_mean, spread_std, zscore = get_dist_zscore(t1_med, t2_med, np.array([wind]))
                 _, _, zscore_curr = get_dist_zscore(t1_curr, t2_curr, np.array([wind]))
-                z_score = zscore[0]
+                spread_mean, spread_std, z_score = zscore[0], spread_mean[0], spread_std[0]
                 z_score_curr = zscore_curr[0]
 
                 # ----- Проверяем условия для входа в позицию -----
@@ -322,7 +324,7 @@ def main():
                     if zscore < low_in and z_score_curr < low_in:
                         open_position(token_1, token_2, mode, t1_curr_data, t2_curr_data,
                                 'long', 'short', leverage, min_order, max_order, fee_rate,
-                                coin_information, postgre_manager)
+                                spread_mean, spread_std, coin_information, postgre_manager)
                         update_positions_flag = True
                         break
 
@@ -330,7 +332,7 @@ def main():
                     if zscore > high_in and z_score_curr > high_in:
                         open_position(token_1, token_2, mode, t1_curr_data, t2_curr_data,
                                 'short', 'long', leverage, min_order, max_order, fee_rate,
-                                coin_information, postgre_manager)
+                                spread_mean, spread_std, coin_information, postgre_manager)
                         update_positions_flag = True
                         break
 
@@ -354,6 +356,12 @@ def main():
 
                     curr_profit = curr_profit_1 + curr_profit_2
                     zscore_arr.append((ts, 'bybit', token_1, token_2, curr_profit, z_score))
+
+                    if curr_profit < -sl_profit_ratio * 2 * max_order:
+                        print(f'{ct} {token_1} - {token_2} STOP-LOSS by profit!')
+                        close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
+                        update_positions_flag = True
+                        break
 
                 # --- Выходим из лонг позиции, если позволяют условия ---
                 if opened.height and side_1 == 'long' and zscore > high_out and z_score_curr > high_out:

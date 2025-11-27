@@ -63,6 +63,22 @@ class DBManager:
         with self.conn.cursor() as cursor:
             cursor.executemany(sql, records)
 
+    def add_pair_to_stop_list(self, token_1, token_2):
+        """Добавляет новый ордер в таблицу stop_list"""
+
+        # Если created_at не передан, используем текущее время
+        Moscow_TZ = timezone(timedelta(hours=3))
+        created_at = datetime.now(Moscow_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+        query = """
+        INSERT INTO stop_list (token_1, token_2, created_at)
+        VALUES (%s, %s, %s)
+        ON CONFLICT DO NOTHING
+        """
+
+        with self.conn.cursor() as cursor:
+            cursor.execute(query, (token_1, token_2, created_at))
+
     def add_pair_order(self, token_1, token_2, created_at, mode, side_1, side_2, qty_1, qty_2,
                        price_1, price_2, usdt_1, usdt_2, fixed_mean, fixed_std, leverage, status):
         """Добавляет новый ордер в таблицу pairs"""

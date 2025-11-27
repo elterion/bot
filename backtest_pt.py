@@ -1,4 +1,4 @@
-from bot.analysis.pair_trading import backtest
+from bot.analysis.backtesting import backtest
 from bot.analysis.strategy_analysis import analyze_strategy
 from datetime import datetime
 from zoneinfo import ZoneInfo

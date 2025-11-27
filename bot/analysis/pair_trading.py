@@ -39,11 +39,11 @@ def _round(value, dp):
     return np.floor(value / dp) * dp
 
 @njit(fastmath=True, cache=True)
-def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
-            dp_1, dp_2, ps_1, ps_2, thresh_low_in, thresh_low_out,
+def backtest_fast(time_arr, z_score, spread_arr, std_arr, bid_1, ask_1, bid_2, ask_2,
+            dp_1, dp_2, thresh_low_in, thresh_low_out,
             thresh_high_in, thresh_high_out, long_possible, short_possible,
             dist_in, dist_out, balance, order_size, qty_method, std_1, std_2,
-            fee_rate,  stop_loss_std, sl_method,
+            fee_rate,  sl_std, sl_dist, sl_method,
             sl_seconds=0, leverage=1):
 
     n = z_score.shape[0]
@@ -67,6 +67,9 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
     sl_counter = 0
     sl_block_long = 0
     sl_block_short = 0
+    fixed_mean = 0.0
+    fixed_std = 0.0
+    fixed_z_score = 0.0
 
     out = NumbaList()
     events = NumbaList()
@@ -170,6 +173,8 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
                 qty_2 = _round(d2 / open_price_2, dp_2)
             pos_side = POS_LONG
             signal = SIG_NONE
+            fixed_mean = spread_arr[i]
+            fixed_std = std_arr[i]
 
             events.append((EV_TYPE_OPEN, open_time, 0, qty_1, qty_2,
                            open_price_1, 0.0, open_price_2, 0.0, pos_side,
@@ -191,6 +196,8 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
                 qty_2 = _round(d2 / open_price_2, dp_2)
             pos_side = POS_SHORT
             signal = SIG_NONE
+            fixed_mean = spread_arr[i]
+            fixed_std = std_arr[i]
 
             events.append((EV_TYPE_OPEN, open_time, 0, qty_1, qty_2,
                            open_price_1, 0.0, open_price_2, 0.0, pos_side,
@@ -253,6 +260,8 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
             open_price_2 = 0.0
             qty_1 = 0.0
             qty_2 = 0.0
+            fixed_mean = 0.0
+            fixed_std = 0.0
 
         # --- Проверяем действующий стоп-лосс счётчик ---
         if sl_counter > 0:
@@ -266,11 +275,11 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
             if sl_method == 2:
                 # Разблокируем стоп-лосс при выходе из зоны лонг-ставки
                 if sl_block_long:
-                    if z > thresh_low_in:
+                    if z > thresh_low_in + sl_dist:
                         sl_block_long = 0
                 # Разблокируем стоп-лосс при выходе из зоны шорт-ставки
                 if sl_block_short:
-                    if z < thresh_high_in:
+                    if z < thresh_high_in - sl_dist:
                         sl_block_short = 0
 
             # Прямой способ входа (когда z_score входит в диапазон входа)
@@ -352,12 +361,19 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
                     long_out_max_value = 0
 
         # --- Проверяем стоп-лосс ---
-        if z > stop_loss_std and pos_side == POS_SHORT:
+        if pos_side == POS_LONG or pos_side == POS_SHORT:
+            avg_1 = (bid_1[i] + ask_1[i]) / 2.0
+            avg_2 = (bid_2[i] + ask_2[i]) / 2.0
+            curr_spr = np.log(avg_1) - np.log(avg_2)
+
+            fixed_z_score = (curr_spr - fixed_mean) / fixed_std
+
+        if abs(fixed_z_score) > sl_std and pos_side == POS_SHORT:
             signal = SIG_SHORT_CLOSE
             reason = REASON_STOPLOSS
             if sl_method == 2:
                 sl_block_short = 1
-        elif z < -stop_loss_std and pos_side == POS_LONG:
+        elif abs(fixed_z_score) > sl_std and pos_side == POS_LONG:
             signal = SIG_LONG_CLOSE
             reason = REASON_STOPLOSS
             if sl_method == 2:
@@ -368,10 +384,10 @@ def backtest_fast(time_arr, z_score, bid_1, ask_1, bid_2, ask_2,
 
     return out, events
 
-def backtest(df, token_1, token_2, dp_1, dp_2, ps_1, ps_2, thresh_low_in, thresh_low_out,
+def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
             thresh_high_in, thresh_high_out, long_possible, short_possible,
             balance, order_size, qty_method, std_1, std_2,
-            fee_rate,  stop_loss_std, sl_method=None,
+            fee_rate,  sl_std, sl_dist, sl_method=None,
             sl_seconds=0, leverage=1, dist_in=0, dist_out=0,
             verbose=False):
     time_arr = df['ts'].to_numpy()
@@ -380,6 +396,11 @@ def backtest(df, token_1, token_2, dp_1, dp_2, ps_1, ps_2, thresh_low_in, thresh
     ask_1 = df[f"{token_1}_ask_price"].to_numpy()
     bid_2 = df[f"{token_2}_bid_price"].to_numpy()
     ask_2 = df[f"{token_2}_ask_price"].to_numpy()
+    spread_arr = df["spread_mean"].to_numpy()
+    std_arr = df["spread_std"].to_numpy()
+
+    spread_arr = spread_arr[~np.isnan(spread_arr)]
+    std_arr = std_arr[~np.isnan(std_arr)]
 
     sl_map = {None: 0, 'counter': 1, 'leave': 2}
     qty_map = {'usdt_neutral': USDT_NEUT, 'vol_neutral': VOL_NEUT}
@@ -387,15 +408,15 @@ def backtest(df, token_1, token_2, dp_1, dp_2, ps_1, ps_2, thresh_low_in, thresh
     if qty_method == 'vol_neutral' and (std_1 is None or std_2 is None):
         raise Exception('При использовании vol_neutral необходимо задать std_1 и std_2')
 
-    res, events = backtest_fast(time_arr, z, bid_1, ask_1, bid_2, ask_2,
-            dp_1, dp_2, ps_1, ps_2,
+    res, events = backtest_fast(time_arr, z, spread_arr, std_arr, bid_1, ask_1, bid_2, ask_2,
+            dp_1, dp_2,
             thresh_low_in=thresh_low_in, thresh_high_in=thresh_high_in,
             thresh_low_out=thresh_low_out, thresh_high_out=thresh_high_out,
             long_possible=long_possible, short_possible=short_possible,
             dist_in=dist_in, dist_out=dist_out,
             balance=balance, order_size=order_size, qty_method=qty_map[qty_method],
             std_1=std_1, std_2=std_2, fee_rate=fee_rate,
-            stop_loss_std=stop_loss_std, sl_method=sl_map[sl_method],
+            sl_std=sl_std, sl_dist=sl_dist, sl_method=sl_map[sl_method],
             sl_seconds=sl_seconds,
             leverage=leverage)
 

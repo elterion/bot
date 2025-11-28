@@ -57,9 +57,9 @@ def main():
             pairs = postgre_manager.get_table('pairs', df_type='polars')
             pending_orders = pairs.filter(pl.col('status').is_in(['opening', 'closing']))
             active_orders = pairs.filter(pl.col('status') == 'active')
+            token_list = pairs['token_1'].to_list() + pairs['token_2'].to_list()
 
             now = int(datetime.timestamp(datetime.now()))
-
             # ------------ Обновление открытых позиций ------------
             if now - last_time > 10:
                 active_positions = trade_manager.get_all_positions(market_type='linear')
@@ -84,6 +84,12 @@ def main():
 
                 postgre_manager.update_pairs(pairs_data)
                 last_time = int(datetime.timestamp(datetime.now()))
+
+            # ------------ Проверка на зависшие позиции -----------
+            for pos in active_positions:            # Перебираем по очереди все позиции, открытые на бирже
+                if pos['token'] not in token_list:  # Если токен есть на бирже, но не учтён в pairs
+                    print(f'Токен {pos['token']} открыт на бирже, но отсутствует в pairs!')
+                    break
 
             # --------------- Проверка сработавших стоп-лоссов --------------
             if len(active_orders) * 2 != len(active_positions):

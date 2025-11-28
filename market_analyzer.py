@@ -83,11 +83,15 @@ def close_position(token_1, token_2, t1_data, t2_data, side_1, side_2, db_manage
         act_2 = 'buy' if side_2 == 'short' else 'sell'
         print(f'{ct} [{side_1} close] {act_1} {open_qty_1} {token_1[:-5]}; {act_2} {open_qty_2} {token_2[:-5]}')
 
-def check_tokens(token_1: str, token_2: str, current_pairs: pl.DataFrame) -> bool:
+def check_tokens(token_1: str, token_2: str, current_pairs: pl.DataFrame, stop_list: pl.DataFrame) -> bool:
     active_tokens = current_pairs['token_1'].to_list() + current_pairs['token_2'].to_list()
     in_pos = token_1 in active_tokens or token_2 in active_tokens
+    in_stop_list = stop_list.filter(
+                        ((pl.col('token_1') == token_1) & (pl.col('token_2') == token_2)) |
+                        ((pl.col('token_1') == token_2) & (pl.col('token_2') == token_1))
+                    ).height > 0
 
-    if in_pos:
+    if in_pos or in_stop_list:
         return False
     else:
         return True
@@ -336,7 +340,7 @@ def main():
                     fixed_z_score = (curr_spread - fixed_mean) / fixed_std
 
                 # ----- Проверяем условия для входа в позицию -----
-                if open_new_orders and pairs.height < max_pairs and check_tokens(token_1, token_2, pairs):
+                if open_new_orders and pairs.height < max_pairs and check_tokens(token_1, token_2, pairs, stop_list):
                     # Проверяем открытие long-позиции по token_1 и short-позиции по token_2
                     if z_score < low_in and z_score_curr < low_in:
                         open_position(token_1, token_2, mode, t1_curr_data, t2_curr_data,
@@ -379,6 +383,7 @@ def main():
                     if curr_profit < -sl_profit_ratio * 2 * max_order:
                         print(f'{ct} {token_1} - {token_2} STOP-LOSS by profit!')
                         close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
+                        postgre_manager.add_pair_to_stop_list(token_1, token_2)
                         update_positions_flag = True
                         break
 

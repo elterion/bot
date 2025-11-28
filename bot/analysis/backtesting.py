@@ -43,8 +43,8 @@ def backtest_fast(time_arr, z_score, spread_arr, std_arr, bid_1, ask_1, bid_2, a
             dp_1, dp_2, thresh_low_in, thresh_low_out,
             thresh_high_in, thresh_high_out, long_possible, short_possible,
             dist_in, dist_out, balance, order_size, qty_method, std_1, std_2,
-            fee_rate,  sl_std, sl_dist, sl_method,
-            sl_seconds=0, leverage=1):
+            fee_rate,  sl_std, sl_dist, sl_method, sl_seconds=0,
+            close_method=0, leverage=1):
 
     n = z_score.shape[0]
     total_balance = balance
@@ -319,77 +319,85 @@ def backtest_fast(time_arr, z_score, spread_arr, std_arr, bid_1, ask_1, bid_2, a
                         signal = SIG_SHORT_OPEN
                         # print('Входим в шорт', time_arr[i], z)
 
-        # --- Проверяем условие выхода из сделки ---
-        if pos_side == POS_SHORT:
-            # Прямой способ (когда z_score входит в диапазон выхода)
-            if not dist_out:
-                if z < thresh_low_out:
-                    signal = SIG_SHORT_CLOSE
-                    reason = REASON_THRESHOLD
-            # Выходим из сделки, когда z_score покидает диапазон выхода
-            else:
-                # Начинаем отслеживать, когда спред опускается ниже порога выхода
-                if not short_out_min_value and z < thresh_low_out:
-                    short_out_min_value = z
-                # Если спред обновляет минимум
-                elif short_out_min_value and z < short_out_min_value:
-                    short_out_min_value = z
-                # Если спред откатывается на dist_out от минимума
-                elif short_out_min_value and z > short_out_min_value + dist_out and z < thresh_low_out:
-                    signal = SIG_SHORT_CLOSE
-                    reason = REASON_THRESHOLD
-                    short_out_min_value = 0
-
-        elif pos_side == POS_LONG:
-            # Прямой способ (когда z_score входит в диапазон выхода)
-            if not dist_out:
-                if z > thresh_high_out:
-                    signal = SIG_LONG_CLOSE
-                    reason = REASON_THRESHOLD
-            # Выходим из сделки, когда z_score покидает диапазон выхода
-            else:
-                # Начинаем отслеживать, когда спред опускается ниже порога выхода
-                if not long_out_max_value and z > thresh_high_out:
-                    long_out_max_value = z
-                # Если спред обновляет максимум
-                elif long_out_max_value and z > long_out_max_value:
-                    long_out_max_value = z
-                # Если спред откатывается на dist_out от максимума
-                elif long_out_max_value and z < long_out_max_value - dist_out and z > thresh_high_out:
-                    signal = SIG_LONG_CLOSE
-                    reason = REASON_THRESHOLD
-                    long_out_max_value = 0
-
-        # --- Проверяем стоп-лосс ---
+        # --- Обрабатываем открытую позицию ---
         if pos_side == POS_LONG or pos_side == POS_SHORT:
             avg_1 = (bid_1[i] + ask_1[i]) / 2.0
             avg_2 = (bid_2[i] + ask_2[i]) / 2.0
             curr_spr = np.log(avg_1) - np.log(avg_2)
-
             fixed_z_score = (curr_spr - fixed_mean) / fixed_std
 
-        if abs(fixed_z_score) > sl_std and pos_side == POS_SHORT:
-            signal = SIG_SHORT_CLOSE
-            reason = REASON_STOPLOSS
-            if sl_method == 2:
-                sl_block_short = 1
-        elif abs(fixed_z_score) > sl_std and pos_side == POS_LONG:
-            signal = SIG_LONG_CLOSE
-            reason = REASON_STOPLOSS
-            if sl_method == 2:
-                sl_block_long = 1
+            out_condition = z if close_method == 0 else fixed_z_score
 
-        if reason == REASON_STOPLOSS and sl_method == 1 and sl_seconds > 0:
-            sl_counter = sl_seconds
+            # --- Проверяем стоп-лосс ---
+            if abs(fixed_z_score) > sl_std and pos_side == POS_SHORT:
+                signal = SIG_SHORT_CLOSE
+                reason = REASON_STOPLOSS
+                if sl_method == 2:
+                    sl_block_short = 1
+            elif abs(fixed_z_score) > sl_std and pos_side == POS_LONG:
+                signal = SIG_LONG_CLOSE
+                reason = REASON_STOPLOSS
+                if sl_method == 2:
+                    sl_block_long = 1
+
+            if reason == REASON_STOPLOSS and sl_method == 1 and sl_seconds > 0:
+                sl_counter = sl_seconds
+
+            # --- Проверяем условие выхода из сделки ---
+            if pos_side == POS_SHORT:
+                # Прямой способ (когда z_score входит в диапазон выхода)
+                if not dist_out:
+                    if out_condition < thresh_low_out:
+                        signal = SIG_SHORT_CLOSE
+                        reason = REASON_THRESHOLD
+                # Выходим из сделки, когда z_score покидает диапазон выхода
+                else:
+                    # Начинаем отслеживать, когда спред опускается ниже порога выхода
+                    if not short_out_min_value and out_condition < thresh_low_out:
+                        short_out_min_value = out_condition
+                    # Если спред обновляет минимум
+                    elif short_out_min_value and out_condition < short_out_min_value:
+                        short_out_min_value = out_condition
+                    # Если спред откатывается на dist_out от минимума
+                    elif short_out_min_value and out_condition > short_out_min_value + dist_out and out_condition < thresh_low_out:
+                        signal = SIG_SHORT_CLOSE
+                        reason = REASON_THRESHOLD
+                        short_out_min_value = 0
+
+            elif pos_side == POS_LONG:
+                # Прямой способ (когда z_score входит в диапазон выхода)
+                if not dist_out:
+                    if out_condition > thresh_high_out:
+                        signal = SIG_LONG_CLOSE
+                        reason = REASON_THRESHOLD
+                # Выходим из сделки, когда z_score покидает диапазон выхода
+                else:
+                    # Начинаем отслеживать, когда спред опускается ниже порога выхода
+                    if not long_out_max_value and out_condition > thresh_high_out:
+                        long_out_max_value = out_condition
+                    # Если спред обновляет максимум
+                    elif long_out_max_value and out_condition > long_out_max_value:
+                        long_out_max_value = out_condition
+                    # Если спред откатывается на dist_out от максимума
+                    elif long_out_max_value and out_condition < long_out_max_value - dist_out and out_condition > thresh_high_out:
+                        signal = SIG_LONG_CLOSE
+                        reason = REASON_THRESHOLD
+                        long_out_max_value = 0
 
     return out, events
 
 def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
             thresh_high_in, thresh_high_out, long_possible, short_possible,
             balance, order_size, qty_method, std_1, std_2,
-            fee_rate,  sl_std, sl_dist, sl_method=None,
-            sl_seconds=0, leverage=1, dist_in=0, dist_out=0,
+            fee_rate,  sl_std, sl_dist, sl_method=None, sl_seconds=0,
+            close_method='regular', leverage=1, dist_in=0, dist_out=0,
             verbose=False):
+    """
+
+
+    close_method: Как закрывать позицию. regular - по обычному z_score, fix - по фиксированному
+    """
+
     time_arr = df['ts'].to_numpy()
     z = df["z_score"].to_numpy()
     bid_1 = df[f"{token_1}_bid_price"].to_numpy()
@@ -404,6 +412,7 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
 
     sl_map = {None: 0, 'counter': 1, 'leave': 2}
     qty_map = {'usdt_neutral': USDT_NEUT, 'vol_neutral': VOL_NEUT}
+    close_map = {'regular': 0, 'fix': 1}
 
     if qty_method == 'vol_neutral' and (std_1 is None or std_2 is None):
         raise Exception('При использовании vol_neutral необходимо задать std_1 и std_2')
@@ -416,8 +425,8 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
             dist_in=dist_in, dist_out=dist_out,
             balance=balance, order_size=order_size, qty_method=qty_map[qty_method],
             std_1=std_1, std_2=std_2, fee_rate=fee_rate,
-            sl_std=sl_std, sl_dist=sl_dist, sl_method=sl_map[sl_method],
-            sl_seconds=sl_seconds,
+            sl_std=sl_std, sl_dist=sl_dist, sl_method=sl_map[sl_method], sl_seconds=sl_seconds,
+            close_method=close_map[close_method],
             leverage=leverage)
 
     trades_df = pl.DataFrame(res, schema=[

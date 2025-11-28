@@ -155,6 +155,7 @@ def main():
     thresh_out = config['thresh_out']
 
     sl_profit_ratio = config['sl_profit_ratio']
+    sl_spread_std = config['sl_spread_std']
 
     # За сколько последних часов брать историю
     if spr_method == 'dist':
@@ -382,6 +383,12 @@ def main():
                     # --- Стоп-лосс по профиту ---
                     if curr_profit < -sl_profit_ratio * 2 * max_order:
                         print(f'{ct} {token_1} - {token_2} STOP-LOSS by profit!')
+                        close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
+                        postgre_manager.add_pair_to_stop_list(token_1, token_2)
+                        update_positions_flag = True
+                        break
+                    if abs(fixed_z_score) > sl_spread_std:
+                        print(f'{ct} {token_1} - {token_2} STOP-LOSS by z_score!')
                         close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
                         postgre_manager.add_pair_to_stop_list(token_1, token_2)
                         update_positions_flag = True

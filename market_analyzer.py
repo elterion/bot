@@ -387,6 +387,7 @@ def main():
                         postgre_manager.add_pair_to_stop_list(token_1, token_2)
                         update_positions_flag = True
                         break
+                    # --- Стоп-лосс при z_score больше 5 ---
                     if abs(fixed_z_score) > sl_spread_std:
                         print(f'{ct} {token_1} - {token_2} STOP-LOSS by z_score!')
                         close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
@@ -394,17 +395,17 @@ def main():
                         update_positions_flag = True
                         break
 
-                # --- Выходим из лонг позиции, если позволяют условия ---
-                if opened.height and side_1 == 'long' and z_score > high_out and z_score_curr > high_out:
-                    close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
-                    update_positions_flag = True
-                    break
+                    # --- Выходим из лонг позиции, если позволяют условия ---
+                    if side_1 == 'long' and z_score > high_out and z_score_curr > high_out:
+                        close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
+                        update_positions_flag = True
+                        break
 
-                # --- Выходим из шорт позиции, если позволяют условия ---
-                if opened.height and side_1 == 'short' and z_score < low_out and z_score_curr < low_out:
-                    close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
-                    update_positions_flag = True
-                    break
+                    # --- Выходим из шорт позиции, если позволяют условия ---
+                    elif side_1 == 'short' and z_score < low_out and z_score_curr < low_out:
+                        close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
+                        update_positions_flag = True
+                        break
 
             zscore_upd_time = int(datetime.timestamp(datetime.now()))
             if zscore_upd_time - last_zscore_update_time >= 10:

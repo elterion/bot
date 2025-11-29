@@ -411,12 +411,12 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
             thresh_high_in, thresh_high_out, long_possible, short_possible,
             balance, order_size, qty_method, std_1, std_2,
             fee_rate,  sl_std, sl_dist, sl_method=None, sl_seconds=0,
-            open_method='direct', close_method='regular', leverage=1, dist_in=0, dist_out=0,
+            open_method='direct', close_method='direct', leverage=1, dist_in=0, dist_out=0,
             verbose=False):
     """
 
 
-    close_method: Как закрывать позицию. regular - по обычному z_score, fix - по фиксированному
+    close_method: Как закрывать позицию. direct - по обычному z_score, fix - по фиксированному
     """
 
     time_arr = df['ts'].to_numpy()
@@ -433,7 +433,7 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
 
     sl_map = {None: 0, 'counter': 1, 'leave': 2}
     qty_map = {'usdt_neutral': USDT_NEUT, 'vol_neutral': VOL_NEUT}
-    close_map = {'regular': 0, 'fix': 1}
+    close_map = {'direct': 0, 'fix': 1}
     open_map = {'direct': 0, 'trailing': 1, 'strict': 2}
 
     if qty_method == 'vol_neutral' and (std_1 is None or std_2 is None):

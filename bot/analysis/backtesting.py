@@ -5,8 +5,11 @@ from zoneinfo import ZoneInfo
 import numpy as np
 from numba import njit
 from numba.typed import List as NumbaList
+import random
 
 from bot.core.exchange.http_api import ExchangeManager, BybitRestAPI
+from bot.analysis.strategy_analysis import analyze_strategy
+from bot.utils.pair_trading import calculate_profit, get_qty
 
 from bot.core.db.postgres_manager import DBManager
 from bot.config.credentials import host, user, password, db_name
@@ -484,3 +487,657 @@ Profit: {profit:.2f}.')
                 print(f"[LIQUIDATION!] {close_date}. Profit: {total_profit:.2f}")
 
     return trades_df
+
+
+def place_demo_order(tokens_in_position, pairs, current_orders, trades,
+                time, token_1, token_2, action, pos_side, qty_1, qty_2,
+                t1_price, t2_price, t1_vol, t2_vol, beta, z_score,
+                tf, wind, thresh_in, thresh_out, fee_rate,
+                min_order_size, max_order_size, leverage, reason=None, verbose=False):
+    if action == 'open':
+        t1_avail_usdt = t1_vol / t1_price
+        t2_avail_usdt = t2_vol / t2_price
+        avail_usdt = min(t1_avail_usdt, t2_avail_usdt, max_order_size) * leverage
+
+        if avail_usdt > min_order_size:
+            pairs.append((token_1, token_2, pos_side))
+            tokens_in_position.append(token_1)
+            tokens_in_position.append(token_2)
+            current_orders[(token_1, token_2)] = {'time': time, 'pos_side': pos_side, 'qty_1': qty_1, 'qty_2': qty_2,
+                                                 't1_price': t1_price, 't2_price': t2_price, 'z_score': z_score}
+            if verbose:
+                act_1 = 'buy' if pos_side == 'long' else 'sell'
+                act_2 = 'sell' if pos_side == 'long' else 'buy'
+                print(f'{time} [{pos_side} open] {act_1} {qty_1} {token_1} for {t1_price}; {act_2} {qty_2} {token_2} for {t2_price}; z_score: {z_score:.2f}')
+
+    elif action == 'close':
+        open_data = current_orders[(token_1, token_2)]
+        open_qty_1 = open_data['qty_1']
+        open_qty_2 = open_data['qty_2']
+
+        if (t1_vol > open_qty_1 and t2_vol > open_qty_2 and reason == 1) or (reason == 2):
+            pairs.remove((token_1, token_2, pos_side))
+            tokens_in_position.remove(token_1)
+            tokens_in_position.remove(token_2)
+
+            fees = fee_rate * (qty_1 * open_data['t1_price'] + qty_2 * open_data['t2_price']) * leverage
+            pos_side_2 = 'short' if pos_side == 'long' else 'long'
+            profit_1 = calculate_profit(open_data['t1_price'], t1_price, n_coins=qty_1, side=pos_side, fee_rate=fee_rate)
+            profit_2 = calculate_profit(open_data['t2_price'], t2_price, n_coins=qty_2, side=pos_side_2, fee_rate=fee_rate)
+
+            trades.append({
+                'open_time': open_data['time'],
+                'close_time': time,
+                'token_1': token_1,
+                'token_2': token_2,
+                'side': pos_side,
+                'tf': tf,
+                'wind': wind,
+                'thresh_in': thresh_in,
+                'thresh_out': thresh_out,
+                'beta': beta,
+                'open_z_score': open_data['z_score'],
+                'close_z_score': z_score,
+                'qty_1': qty_1,
+                'qty_2': qty_2,
+                'open_price_1': open_data['t1_price'],
+                'close_price_1': t1_price,
+                'open_price_2': open_data['t2_price'],
+                'close_price_2': t2_price,
+                'fees': fees,
+                'profit_1': profit_1,
+                'profit_2': profit_2,
+                'total_profit': profit_1 + profit_2,
+                'reason': reason,
+            })
+
+            current_orders.pop((token_1, token_2))
+
+            if verbose:
+                act_1 = 'buy' if pos_side == 'long' else 'sell'
+                act_2 = 'sell' if pos_side == 'long' else 'buy'
+                print(f'{time} [{pos_side} close] {act_1} {qty_1} {token_1} for {t1_price}; {act_2} {qty_2} {token_2} for {t2_price}; z_score: {z_score:.2f}')
+
+def run_single_tf_backtest(main_df, tf, wind, in_, out_, leverage, max_pairs, min_order_size, max_order_size,
+                           qty_method, fee_rate, start_time, end_time, sl_ratio,
+                           coin_information, force_close=False, verbose=False):
+    tokens_in_position = []
+    pairs = []
+    current_orders = {}
+    trades = []
+
+    all_pairs = [(col.split('_')[0], col.split('_')[1]) for col in main_df.columns if col.endswith('z_score')]
+
+    # Добавим перемешивание порядка токенов, потому что он влияет на те позиции, которые будут открыты в моменте
+    random.shuffle(all_pairs)
+
+    for row in main_df.iter_rows(named=True):
+        time = row['time']
+
+        for token_1, token_2 in all_pairs:
+            if not row[token_1] or not row[token_2] or not row[f'{token_1}_{token_2}_z_score']:
+                continue
+
+            low_in = -in_
+            low_out = -out_
+            high_in = in_
+            high_out = out_
+
+            z_score = row[f'{token_1}_{token_2}_z_score']
+
+            # ----- Проверяем условия для входа в позицию -----
+            if (len(pairs) < max_pairs and
+                token_1 not in tokens_in_position and
+                token_2 not in tokens_in_position):
+
+                # --- Входим в лонг ---
+                if z_score < low_in:
+                    t1_price = row[f'{token_1}_ask_price']
+                    t2_price = row[f'{token_2}_bid_price']
+                    t1_vol = row[f'{token_1}_ask_size']
+                    t2_vol = row[f'{token_2}_bid_size']
+                    qty_1, qty_2 = get_qty(token_1, token_2, t1_price, t2_price, None, coin_information, 2 * max_order_size * leverage,
+                              method=qty_method)
+                    place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                                'open', 'long', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
+                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, verbose=verbose)
+
+                # --- Открываем шорт ---
+                if z_score > high_in:
+                    t1_price = row[f'{token_1}_bid_price']
+                    t2_price = row[f'{token_2}_ask_price']
+                    t1_vol = row[f'{token_1}_bid_size']
+                    t2_vol = row[f'{token_2}_ask_size']
+                    qty_1, qty_2 = get_qty(token_1, token_2, t1_price, t2_price, None, coin_information, 2 * max_order_size * leverage,
+                              method=qty_method)
+                    place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                                'open', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
+                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, verbose=verbose)
+
+            # ----- Проверяем условия для выхода из позиции -----
+            # --- Закрываем лонг ---
+            if z_score > high_out and (token_1, token_2, 'long') in pairs:
+                t1_price = row[f'{token_1}_bid_price']
+                t2_price = row[f'{token_2}_ask_price']
+                t1_vol = row[f'{token_1}_bid_size']
+                t2_vol = row[f'{token_2}_ask_size']
+                qty_1 = current_orders[(token_1, token_2)]['qty_1']
+                qty_2 = current_orders[(token_1, token_2)]['qty_2']
+                place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                            'close', 'long', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
+                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, reason=1, verbose=verbose)
+
+            # --- Закрываем шорт ---
+            if z_score < low_out and (token_1, token_2, 'short') in pairs:
+                t1_price = row[f'{token_1}_ask_price']
+                t2_price = row[f'{token_2}_bid_price']
+                t1_vol = row[f'{token_1}_ask_size']
+                t2_vol = row[f'{token_2}_bid_size']
+                qty_1 = current_orders[(token_1, token_2)]['qty_1']
+                qty_2 = current_orders[(token_1, token_2)]['qty_2']
+                place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                            'close', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
+                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, reason=1,
+                                verbose=verbose)
+
+            # --- Проверка стоп-лосса ---
+            if (token_1, token_2, 'long') in pairs:
+                qty_1 = current_orders[(token_1, token_2)]['qty_1']
+                qty_2 = current_orders[(token_1, token_2)]['qty_2']
+                op_1 = current_orders[(token_1, token_2)]['t1_price']
+                op_2 = current_orders[(token_1, token_2)]['t2_price']
+                t1_price = row[f'{token_1}_bid_price']
+                t2_price = row[f'{token_2}_ask_price']
+
+                sl_price_1 = op_1 - 0.85 * op_1 / leverage
+                sl_price_2 = op_2 + 0.85 * op_2 / leverage
+
+                pos_size = (qty_1 * op_1 + qty_2 * op_2) / leverage
+
+                pr_1 = calculate_profit(open_price=op_1, close_price=t1_price, n_coins=qty_1, side='long')
+                pr_2 = calculate_profit(open_price=op_2, close_price=t2_price, n_coins=qty_2, side='short')
+                total_pr = pr_1 + pr_2
+
+                if t1_price < sl_price_1 or t2_price > sl_price_2 or total_pr < -sl_ratio * pos_size:
+                    t1_vol = row[f'{token_1}_bid_size']
+                    t2_vol = row[f'{token_2}_ask_size']
+
+                    place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                                'close', 'long', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
+                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, reason=2, verbose=verbose)
+
+            if (token_1, token_2, 'short') in pairs:
+                qty_1 = current_orders[(token_1, token_2)]['qty_1']
+                qty_2 = current_orders[(token_1, token_2)]['qty_2']
+                op_1 = current_orders[(token_1, token_2)]['t1_price']
+                op_2 = current_orders[(token_1, token_2)]['t2_price']
+                t1_price = row[f'{token_1}_ask_price']
+                t2_price = row[f'{token_2}_bid_price']
+
+                sl_price_1 = op_1 + 0.85 * op_1 / leverage
+                sl_price_2 = op_2 - 0.85 * op_2 / leverage
+
+                pos_size = (qty_1 * op_1 + qty_2 * op_2) / leverage
+
+                pr_1 = calculate_profit(open_price=op_1, close_price=t1_price, n_coins=qty_1, side='short')
+                pr_2 = calculate_profit(open_price=op_2, close_price=t2_price, n_coins=qty_2, side='long')
+                total_pr = pr_1 + pr_2
+
+                if t1_price > sl_price_1 or t2_price < sl_price_2 or total_pr < -sl_ratio * pos_size:
+                    t1_vol = row[f'{token_1}_ask_size']
+                    t2_vol = row[f'{token_2}_bid_size']
+
+                    place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                                'close', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
+                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, reason=2, verbose=verbose)
+
+    if verbose:
+        for pair, info in current_orders.items():
+            print(pair, info['time'])
+
+    if force_close:
+        row = main_df[-1]
+        time = row['time'][0]
+        orders_to_close = current_orders.copy()
+
+        for pair, info in orders_to_close.items():
+            z_score = row[f'{token_1}_{token_2}_z_score'][0]
+            token_1 = pair[0]
+            token_2 = pair[1]
+            pos_side = info['pos_side']
+            qty_1 = info['qty_1']
+            qty_2 = info['qty_2']
+            t1_vol = 1_000_000
+            t2_vol = 1_000_000
+            t1_price = row[f'{token_1}_bid_price'][0] if pos_side == 'long' else row[f'{token_1}_ask_price'][0]
+            t2_price = row[f'{token_2}_ask_price'][0] if pos_side == 'long' else row[f'{token_2}_bid_price'][0]
+
+            place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                            'close', pos_side, qty_1, qty_2, t1_price, t2_price,
+                            t1_vol, t2_vol, None, z_score, tf, wind, in_, out_, fee_rate,
+                            min_order_size, max_order_size, leverage, reason=1,
+                            verbose=verbose)
+
+
+    trades_df = pl.DataFrame(trades)
+    try:
+        trades_df = trades_df.with_columns(
+            (pl.col('open_time').dt.timestamp() // 1_000_000).alias('open_ts'),
+            (pl.col('close_time').dt.timestamp() // 1_000_000).alias('close_ts'),
+            (pl.col('close_time') - pl.col('open_time')).alias('duration'),
+        )
+
+        metrics = analyze_strategy(trades_df, start_date=start_time, end_date=end_time, initial_balance=200.0)
+        return trades_df, metrics
+    except pl.ColumnNotFoundError:
+        return None
+
+def run_single_tf_backtest_reverse(main_df, tf, wind, in_, out_, dist_in, dist_out, max_pairs, leverage,
+                                   min_order_size, max_order_size, qty_method, fee_rate, start_time, end_time,
+                                   sl_ratio, coin_information, reverse_in=True, reverse_out=False,
+                                   verbose=False):
+    tokens_in_position = []
+    pairs = []
+    current_orders = {}
+    trades = []
+    curr_tracking_in = dict()
+    curr_tracking_out = dict()
+
+    all_pairs = [(col.split('_')[0], col.split('_')[1]) for col in main_df.columns if col.endswith('z_score')]
+
+    # Добавим перемешивание порядка токенов, потому что он влияет на те позиции, которые будут открыты в моменте
+    random.shuffle(all_pairs)
+
+    for row in main_df.iter_rows(named=True):
+        time = row['time']
+
+        for token_1, token_2 in all_pairs:
+            if not row[token_1] or not row[token_2] or not row[f'{token_1}_{token_2}_z_score']:
+                continue
+
+            low_in = -in_
+            low_out = -out_
+            high_in = in_
+            high_out = out_
+
+            flag_in = False
+            flag_out = False
+
+            z_score = row[f'{token_1}_{token_2}_z_score']
+
+            # Если пара токенов входит в диапазон открытия позиции, и она ещё не отслеживается, добавляем в треккинг
+            if abs(z_score) > in_ and not (token_1, token_2) in curr_tracking_in:
+                curr_tracking_in[(token_1, token_2)] = z_score
+            # Если пара токенов уже отслеживается, обновляем максимумы
+            elif (token_1, token_2) in curr_tracking_in and abs(z_score) > abs(curr_tracking_in[(token_1, token_2)]):
+                curr_tracking_in[(token_1, token_2)] = z_score
+            # Если открыто максимальное кол-во позиций, а текущая пара выходит из диапазона входа, убираем из отслеживаемых
+            elif (token_1, token_2) in curr_tracking_in and abs(z_score) < in_ and len(pairs) >= max_pairs:
+                curr_tracking_in.pop((token_1, token_2))
+            # Если z_score откатывается на dist от максимума, разрешаем открытие позиции
+            elif (token_1, token_2) in curr_tracking_in and abs(z_score) < abs(curr_tracking_in[(token_1, token_2)]) - dist_in:
+                flag_in = True
+
+            # --- Дальше проверяем те пары, которые уже в позиции ---
+
+            if (token_1, token_2, 'long') in pairs and z_score > high_out and not (token_1, token_2) in curr_tracking_out:
+                curr_tracking_out[(token_1, token_2)] = z_score
+            # Если пара токенов уже отслеживается, обновляем максимумы
+            elif ((token_1, token_2, 'long') in pairs and
+                  (token_1, token_2) in curr_tracking_out and
+                  z_score > curr_tracking_out[(token_1, token_2)]):
+                curr_tracking_out[(token_1, token_2)] = z_score
+            # Если пара покидает диапазон выхода, убираем из трека
+            elif ((token_1, token_2, 'long') in pairs and
+                  (token_1, token_2) in curr_tracking_out and
+                  z_score < high_out):
+                curr_tracking_out.pop((token_1, token_2))
+            # Если z_score откатывается на dist от максимума, разрешаем закрытие позиции
+            elif ((token_1, token_2, 'long') in pairs and
+                  (token_1, token_2) in curr_tracking_out and
+                  z_score < curr_tracking_out[(token_1, token_2)] - dist_out):
+                flag_out = True
+
+            if (token_1, token_2, 'short') in pairs and z_score < low_out and not (token_1, token_2) in curr_tracking_out:
+                curr_tracking_out[(token_1, token_2)] = z_score
+            # Если пара токенов уже отслеживается, обновляем максимумы
+            elif ((token_1, token_2, 'short') in pairs and
+                  (token_1, token_2) in curr_tracking_out and
+                  z_score < curr_tracking_out[(token_1, token_2)]):
+                curr_tracking_out[(token_1, token_2)] = z_score
+            # Если пара покидает диапазон выхода, убираем из трека
+            elif ((token_1, token_2, 'short') in pairs and
+                  (token_1, token_2) in curr_tracking_out and
+                  z_score > low_out):
+                curr_tracking_out.pop((token_1, token_2))
+            # Если z_score откатывается на dist от максимума, разрешаем закрытие позиции
+            elif ((token_1, token_2, 'short') in pairs and
+                  (token_1, token_2) in curr_tracking_out and
+                  z_score > curr_tracking_out[(token_1, token_2)] + dist_out):
+                flag_out = True
+
+            # ----- Проверяем условия для входа в позицию -----
+            if (len(pairs) < max_pairs and token_1 not in tokens_in_position and token_2 not in tokens_in_position) and flag_in:
+
+                # --- Входим в лонг ---
+                if z_score < low_in:
+                    t1_price = row[f'{token_1}_ask_price']
+                    t2_price = row[f'{token_2}_bid_price']
+                    t1_vol = row[f'{token_1}_ask_size']
+                    t2_vol = row[f'{token_2}_bid_size']
+                    qty_1, qty_2 = get_qty(token_1, token_2, t1_price, t2_price, None, coin_information, 2 * max_order_size * leverage,
+                              method=qty_method)
+                    place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                                'open', 'long', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
+                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, verbose=verbose)
+                    flag_in = False
+
+                # --- Открываем шорт ---
+                if z_score > high_in:
+                    t1_price = row[f'{token_1}_bid_price']
+                    t2_price = row[f'{token_2}_ask_price']
+                    t1_vol = row[f'{token_1}_bid_size']
+                    t2_vol = row[f'{token_2}_ask_size']
+                    qty_1, qty_2 = get_qty(token_1, token_2, t1_price, t2_price, None, coin_information, 2 * max_order_size * leverage,
+                              method=qty_method)
+                    place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                                'open', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
+                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, verbose=verbose)
+                    flag_in = False
+
+            # ----- Проверяем условия для выхода из позиции -----
+            # --- Закрываем лонг ---
+            if z_score > high_out and (token_1, token_2, 'long') in pairs and flag_out:
+                t1_price = row[f'{token_1}_bid_price']
+                t2_price = row[f'{token_2}_ask_price']
+                t1_vol = row[f'{token_1}_bid_size']
+                t2_vol = row[f'{token_2}_ask_size']
+                qty_1 = current_orders[(token_1, token_2)]['qty_1']
+                qty_2 = current_orders[(token_1, token_2)]['qty_2']
+                place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                            'close', 'long', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
+                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, reason=1, verbose=verbose)
+                flag_out = False
+
+            # --- Закрываем шорт ---
+            if z_score < low_out and (token_1, token_2, 'short') in pairs and flag_out:
+                t1_price = row[f'{token_1}_ask_price']
+                t2_price = row[f'{token_2}_bid_price']
+                t1_vol = row[f'{token_1}_ask_size']
+                t2_vol = row[f'{token_2}_bid_size']
+                qty_1 = current_orders[(token_1, token_2)]['qty_1']
+                qty_2 = current_orders[(token_1, token_2)]['qty_2']
+                place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                            'close', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
+                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, reason=1, verbose=verbose)
+                flag_out = False
+
+            # --- Проверка стоп-лосса ---
+            if (token_1, token_2, 'long') in pairs:
+                qty_1 = current_orders[(token_1, token_2)]['qty_1']
+                qty_2 = current_orders[(token_1, token_2)]['qty_2']
+                op_1 = current_orders[(token_1, token_2)]['t1_price']
+                op_2 = current_orders[(token_1, token_2)]['t2_price']
+                t1_price = row[f'{token_1}_bid_price']
+                t2_price = row[f'{token_2}_ask_price']
+
+                sl_price_1 = op_1 - 0.85 * op_1 / leverage
+                sl_price_2 = op_2 + 0.85 * op_2 / leverage
+
+                pos_size = (qty_1 * op_1 + qty_2 * op_2) / leverage
+
+                pr_1 = calculate_profit(open_price=op_1, close_price=t1_price, n_coins=qty_1, side='long')
+                pr_2 = calculate_profit(open_price=op_2, close_price=t2_price, n_coins=qty_2, side='short')
+                total_pr = pr_1 + pr_2
+
+                if t1_price < sl_price_1 or t2_price > sl_price_2 or total_pr < -sl_ratio * pos_size:
+
+                    t1_vol = row[f'{token_1}_bid_size']
+                    t2_vol = row[f'{token_2}_ask_size']
+
+                    place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                                'close', 'long', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
+                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, reason=2, verbose=verbose)
+
+            if (token_1, token_2, 'short') in pairs:
+                qty_1 = current_orders[(token_1, token_2)]['qty_1']
+                qty_2 = current_orders[(token_1, token_2)]['qty_2']
+                op_1 = current_orders[(token_1, token_2)]['t1_price']
+                op_2 = current_orders[(token_1, token_2)]['t2_price']
+                t1_price = row[f'{token_1}_ask_price']
+                t2_price = row[f'{token_2}_bid_price']
+
+                sl_price_1 = op_1 + 0.85 * op_1 / leverage
+                sl_price_2 = op_2 - 0.85 * op_2 / leverage
+
+                pos_size = (qty_1 * op_1 + qty_2 * op_2) / leverage
+
+                pr_1 = calculate_profit(open_price=op_1, close_price=t1_price, n_coins=qty_1, side='short')
+                pr_2 = calculate_profit(open_price=op_2, close_price=t2_price, n_coins=qty_2, side='long')
+                total_pr = pr_1 + pr_2
+
+                if t1_price > sl_price_1 or t2_price < sl_price_2 or total_pr < -sl_ratio * pos_size:
+                    t1_vol = row[f'{token_1}_ask_size']
+                    t2_vol = row[f'{token_2}_bid_size']
+
+                    place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                                'close', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, z_score,
+                                tf, wind, in_, out_, fee_rate, min_order_size, max_order_size, leverage, reason=2, verbose=verbose)
+
+    if verbose:
+        for pair, info in current_orders.items():
+            print(pair, info['time'])
+
+    trades_df = pl.DataFrame(trades)
+    trades_df = trades_df.with_columns(
+        (pl.col('open_time').dt.timestamp() // 1_000_000).alias('open_ts'),
+        (pl.col('close_time').dt.timestamp() // 1_000_000).alias('close_ts'),
+        (pl.col('close_time') - pl.col('open_time')).alias('duration'),
+    )
+
+    metrics = analyze_strategy(trades_df, start_date=start_time, end_date=end_time, initial_balance=200.0)
+    return trades_df, metrics
+
+def run_double_tf_backtest(main_df, tf_1, wind_1, tf_2, wind_2, in_1, out_1, in_2, out_2, leverage,
+                           max_pairs, min_order_size, max_order_size, fee_rate, start_time, end_time,
+                           sl_ratio, coin_information, verbose=False):
+    tokens_in_position = []
+    pairs = []
+    current_orders = {}
+    trades = []
+
+    all_pairs = [(col.split('_')[0], col.split('_')[1]) for col in main_df.columns
+                 if (col.endswith('z_score_1') or col.endswith('z_score_2'))]
+    random.shuffle(all_pairs)
+
+    for row in main_df.iter_rows(named=True):
+        time = row['time']
+
+        for token_1, token_2 in all_pairs:
+            if not row[token_1] or not row[token_2] or not row[f'{token_1}_{token_2}_z_score_1'] or not row[f'{token_1}_{token_2}_z_score_2']:
+                continue
+
+            low_in_1 = -in_1
+            low_out_1 = -out_1
+            high_in_1 = in_1
+            high_out_1 = out_1
+
+            low_in_2 = -in_2
+            low_out_2 = -out_2
+            high_in_2 = in_2
+            high_out_2 = out_2
+
+            z_score_1 = row[f'{token_1}_{token_2}_z_score_1']
+            z_score_2 = row[f'{token_1}_{token_2}_z_score_2']
+
+            # ----- Проверяем условия для входа в позицию -----
+            if (len(pairs) < max_pairs and token_1 not in tokens_in_position and token_2 not in tokens_in_position):
+
+                # --- Входим в лонг ---
+                if z_score_1 < low_in_1 and z_score_2 < low_in_2:
+                    t1_price = row[f'{token_1}_ask_price']
+                    t2_price = row[f'{token_2}_bid_price']
+                    t1_vol = row[f'{token_1}_ask_size']
+                    t2_vol = row[f'{token_2}_bid_size']
+                    qty_1, qty_2 = get_qty(token_1, token_2, t1_price, t2_price, None, coin_information, 2 * max_order_size * leverage,
+                              method='usdt_neutral')
+                    place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                        'open', 'long', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, (z_score_1, z_score_2),
+                        (tf_1, tf_2), (wind_1, wind_2), (in_1, in_2), (out_1, out_2), fee_rate,
+                        min_order_size, max_order_size, leverage, verbose=verbose)
+
+                # --- Открываем шорт ---
+                if z_score_1 > high_in_1 and z_score_2 > high_in_2:
+                    t1_price = row[f'{token_1}_bid_price']
+                    t2_price = row[f'{token_2}_ask_price']
+                    t1_vol = row[f'{token_1}_bid_size']
+                    t2_vol = row[f'{token_2}_ask_size']
+                    qty_1, qty_2 = get_qty(token_1, token_2, t1_price, t2_price, None, coin_information, 2 * max_order_size * leverage,
+                              method='usdt_neutral')
+                    place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                        'open', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, (z_score_1, z_score_2),
+                        (tf_1, tf_2), (wind_1, wind_2), (in_1, in_2), (out_1, out_2), fee_rate,
+                        min_order_size, max_order_size, leverage, verbose=verbose)
+
+            # ----- Проверяем условия для выхода из позиции -----
+            # --- Закрываем лонг ---
+            if z_score_1 > high_out_1 and z_score_2 > high_out_2 and (token_1, token_2, 'long') in pairs:
+                t1_price = row[f'{token_1}_bid_price']
+                t2_price = row[f'{token_2}_ask_price']
+                t1_vol = row[f'{token_1}_bid_size']
+                t2_vol = row[f'{token_2}_ask_size']
+                qty_1 = current_orders[(token_1, token_2)]['qty_1']
+                qty_2 = current_orders[(token_1, token_2)]['qty_2']
+                place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                    'close', 'long', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, (z_score_1, z_score_2),
+                    (tf_1, tf_2), (wind_1, wind_2), (in_1, in_2), (out_1, out_2), fee_rate,
+                    min_order_size, max_order_size, leverage, reason=1, verbose=verbose)
+
+            # --- Закрываем шорт ---
+            if z_score_1 < low_out_1 and z_score_2 < low_out_2 and (token_1, token_2, 'short') in pairs:
+                t1_price = row[f'{token_1}_ask_price']
+                t2_price = row[f'{token_2}_bid_price']
+                t1_vol = row[f'{token_1}_ask_size']
+                t2_vol = row[f'{token_2}_bid_size']
+                qty_1 = current_orders[(token_1, token_2)]['qty_1']
+                qty_2 = current_orders[(token_1, token_2)]['qty_2']
+                place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                    'close', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, (z_score_1, z_score_2),
+                    (tf_1, tf_2), (wind_1, wind_2), (in_1, in_2), (out_1, out_2), fee_rate,
+                    min_order_size, max_order_size, leverage, reason=1, verbose=verbose)
+
+            # --- Проверка стоп-лосса ---
+            if (token_1, token_2, 'long') in pairs:
+                qty_1 = current_orders[(token_1, token_2)]['qty_1']
+                qty_2 = current_orders[(token_1, token_2)]['qty_2']
+                op_1 = current_orders[(token_1, token_2)]['t1_price']
+                op_2 = current_orders[(token_1, token_2)]['t2_price']
+                t1_price = row[f'{token_1}_bid_price']
+                t2_price = row[f'{token_2}_ask_price']
+
+                sl_price_1 = op_1 - 0.85 * op_1 / leverage
+                sl_price_2 = op_2 + 0.85 * op_2 / leverage
+
+                pos_size = (qty_1 * op_1 + qty_2 * op_2) / leverage
+
+                pr_1 = calculate_profit(open_price=op_1, close_price=t1_price, n_coins=qty_1, side='long')
+                pr_2 = calculate_profit(open_price=op_2, close_price=t2_price, n_coins=qty_2, side='short')
+                total_pr = pr_1 + pr_2
+
+                if t1_price < sl_price_1 or t2_price > sl_price_2 or total_pr < -sl_ratio * pos_size:
+                    t1_vol = row[f'{token_1}_bid_size']
+                    t2_vol = row[f'{token_2}_ask_size']
+
+                    place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                        'close', 'long', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, (z_score_1, z_score_2),
+                        (tf_1, tf_2), (wind_1, wind_2), (in_1, in_2), (out_1, out_2), fee_rate,
+                        min_order_size, max_order_size, leverage, reason=2, verbose=verbose)
+
+            if (token_1, token_2, 'short') in pairs:
+                qty_1 = current_orders[(token_1, token_2)]['qty_1']
+                qty_2 = current_orders[(token_1, token_2)]['qty_2']
+                op_1 = current_orders[(token_1, token_2)]['t1_price']
+                op_2 = current_orders[(token_1, token_2)]['t2_price']
+                t1_price = row[f'{token_1}_ask_price']
+                t2_price = row[f'{token_2}_bid_price']
+
+                sl_price_1 = op_1 + 0.85 * op_1 / leverage
+                sl_price_2 = op_2 - 0.85 * op_2 / leverage
+
+                pos_size = (qty_1 * op_1 + qty_2 * op_2) / leverage
+
+                pr_1 = calculate_profit(open_price=op_1, close_price=t1_price, n_coins=qty_1, side='long')
+                pr_2 = calculate_profit(open_price=op_2, close_price=t2_price, n_coins=qty_2, side='short')
+                total_pr = pr_1 + pr_2
+
+                if t1_price > sl_price_1 or t2_price < sl_price_2 or total_pr < -sl_ratio * pos_size:
+                    t1_vol = row[f'{token_1}_ask_size']
+                    t2_vol = row[f'{token_2}_bid_size']
+
+                    place_demo_order(tokens_in_position, pairs, current_orders, trades, time, token_1, token_2,
+                        'close', 'short', qty_1, qty_2, t1_price, t2_price, t1_vol, t2_vol, None, (z_score_1, z_score_2),
+                        (tf_1, tf_2), (wind_1, wind_2), (in_1, in_2), (out_1, out_2), fee_rate,
+                        min_order_size, max_order_size, leverage, reason=2, verbose=verbose)
+
+    trades_df = pl.DataFrame(trades)
+    trades_df = trades_df.with_columns(
+            (pl.col('open_time').dt.timestamp() // 1_000_000).alias('open_ts'),
+            (pl.col('close_time').dt.timestamp() // 1_000_000).alias('close_ts'),
+            (pl.col('close_time') - pl.col('open_time')).alias('duration'),
+            pl.col("tf").list.get(0).alias("tf_1"),
+            pl.col("tf").list.get(1).alias("tf_2"),
+            pl.col("wind").list.get(0).alias("wind_1"),
+            pl.col("wind").list.get(1).alias("wind_2"),
+            pl.col("thresh_in").list.get(0).alias("in_1"),
+            pl.col("thresh_in").list.get(1).alias("in_2"),
+            pl.col("thresh_out").list.get(0).alias("out_1"),
+            pl.col("thresh_out").list.get(1).alias("out_2"),
+            pl.col("open_z_score").list.get(0).alias("open_z_score_1"),
+            pl.col("open_z_score").list.get(1).alias("open_z_score_2"),
+            pl.col("close_z_score").list.get(0).alias("close_z_score_1"),
+            pl.col("close_z_score").list.get(1).alias("close_z_score_2"),
+        ).drop('tf', 'wind', 'thresh_in', 'thresh_out', 'beta', 'open_z_score', 'close_z_score')
+
+    metrics = analyze_strategy(trades_df, start_date=start_time, end_date=end_time, initial_balance=200.0)
+    return trades_df, metrics
+
+def select_cols_1tf(df, cointegrated_tokens, tf, wind):
+    cols = []
+
+    # Отбираем только нужные строки, чтобы сэкономить память
+    for token_1, token_2 in cointegrated_tokens:
+        if token_1 not in df.columns or token_2 not in df.columns:
+            continue
+
+        cols.extend(['time', token_1, f'{token_1}_size', f'{token_1}_bid_price', f'{token_1}_ask_price',
+                        f'{token_1}_bid_size', f'{token_1}_ask_size', token_2, f'{token_2}_size',
+                        f'{token_2}_bid_price', f'{token_2}_ask_price', f'{token_2}_bid_size', f'{token_2}_ask_size',
+                        f'{token_1}_{token_2}_z_score_{wind}_{tf}'])
+    cols = list(set(cols))
+    cols_to_rename = [col for col in cols if col.endswith(f'_{wind}_{tf}')]
+    tail = len(f'_{wind}_{tf}')
+    mapping = {c: c[:-tail] for c in cols_to_rename}
+
+    return df.select(cols).rename(mapping)
+
+def select_cols_2tf(df, cointegrated_tokens, tf_1, wind_1, tf_2, wind_2):
+    cols = []
+
+    # Отбираем только нужные строки, чтобы сэкономить память
+    for token_1, token_2 in cointegrated_tokens:
+        if token_1 not in df.columns or token_2 not in df.columns:
+            continue
+
+        cols.extend(['time', token_1, f'{token_1}_size', f'{token_1}_bid_price', f'{token_1}_ask_price',
+                        f'{token_1}_bid_size', f'{token_1}_ask_size', token_2, f'{token_2}_size',
+                        f'{token_2}_bid_price', f'{token_2}_ask_price', f'{token_2}_bid_size', f'{token_2}_ask_size',
+                        f'{token_1}_{token_2}_z_score_{wind_1}_{tf_1}', f'{token_1}_{token_2}_z_score_{wind_2}_{tf_2}'])
+    cols = list(set(cols))
+    cols_to_rename_1 = [col for col in cols if col.endswith(f'_{wind_1}_{tf_1}')]
+    cols_to_rename_2 = [col for col in cols if col.endswith(f'_{wind_2}_{tf_2}')]
+    tail_1 = len(f'_{wind_1}_{tf_1}')
+    mapping_1 = {c: c[:-tail_1] + '_1' for c in cols_to_rename_1}
+    tail_2 = len(f'_{wind_2}_{tf_2}')
+    mapping_2 = {c: c[:-tail_2] + '_2' for c in cols_to_rename_2}
+
+    return df.select(cols).rename(mapping_1).rename(mapping_2)

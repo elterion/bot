@@ -395,13 +395,13 @@ def main():
                         break
 
                 # --- Выходим из лонг позиции, если позволяют условия ---
-                if opened.height and side_1 == 'long' and fixed_z_score > high_out and z_score_curr > high_out:
+                if opened.height and side_1 == 'long' and z_score > high_out and z_score_curr > high_out:
                     close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
                     update_positions_flag = True
                     break
 
                 # --- Выходим из шорт позиции, если позволяют условия ---
-                if opened.height and side_1 == 'short' and fixed_z_score < low_out and z_score_curr < low_out:
+                if opened.height and side_1 == 'short' and z_score < low_out and z_score_curr < low_out:
                     close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
                     update_positions_flag = True
                     break

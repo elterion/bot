@@ -5,8 +5,6 @@ from numba import njit
 from bot.utils.coins import get_step_info
 import math
 import ast
-import random
-from bot.analysis.strategy_analysis import analyze_strategy
 
 def round_down(value: float, dp: float):
     return round(math.floor(value / dp) * dp, 6)
@@ -717,3 +715,53 @@ def calculate_profit(open_price, close_price, n_coins, side, fee_rate=0.001):
     elif side == 'short':
         profit = usdt_open - usdt_close - open_fee - close_fee
     return profit
+
+@njit(cache=True)
+def calculate_half_life(spread):
+    """
+    Рассчитывает период полураспада (Half-Life) спреда через процесс Орнштейна-Уленбека.
+    """
+    n = len(spread)
+
+    # Создаем лагированный спред и разности
+    spread_lag = np.empty_like(spread)
+    spread_lag[0] = 0
+    spread_lag[1:] = spread[:-1]
+
+    spread_ret = np.empty_like(spread)
+    spread_ret[0] = 0
+    spread_ret[1:] = spread[1:] - spread[:-1]
+
+    y = spread_ret[1:]  # зависимая переменная
+    x = spread_lag[1:]  # независимая переменная
+    n_valid = len(y)
+
+    sum_x = np.sum(x)
+    sum_y = np.sum(y)
+    sum_x2 = np.sum(x**2)
+    sum_xy = np.dot(x, y)
+
+    denominator = n_valid * sum_x2 - sum_x**2
+    if denominator == 0:
+        return np.inf
+
+    lambda_param = (n_valid * sum_xy - sum_x * sum_y) / denominator
+
+    if lambda_param >= 0:
+        return np.inf
+
+    half_life = -np.log(2) / lambda_param
+    return half_life
+
+def lr_coefs(y):
+    n = len(y)
+    x = np.arange(n)
+
+    sum_x = n * (n - 1) / 2
+    sum_x2 = (n - 1) * n * (2 * n - 1) / 6
+    sum_y = np.sum(y)
+    sum_xy = np.dot(x, y)
+
+    k = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x ** 2)
+    b = (sum_y - k * sum_x) / n
+    return k, b

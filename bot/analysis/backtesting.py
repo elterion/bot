@@ -1,13 +1,11 @@
 import polars as pl
 import polars_ols as pls
-from datetime import datetime, timezone, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime
 import numpy as np
 from numba import njit
 from numba.typed import List as NumbaList
 import random
 
-from bot.core.exchange.http_api import ExchangeManager, BybitRestAPI
 from bot.analysis.strategy_analysis import analyze_strategy
 from bot.utils.pair_trading import calculate_profit, get_qty
 
@@ -19,7 +17,7 @@ db_manager = DBManager(db_params)
 SIG_NONE, SIG_LONG_OPEN, SIG_SHORT_OPEN, SIG_LONG_CLOSE, SIG_SHORT_CLOSE = 0, 1, 2, 3, 4
 POS_NONE, POS_LONG, POS_SHORT = 0, 1, 2
 REASON_NONE, REASON_THRESHOLD, REASON_STOPLOSS, REASON_LIQ = 0, 1, 2, 3
-LIQ_NONE, LIQ_LONG, LIQ_SHORT = 0, 1, 2  # для внутренней логики
+LIQ_NONE, LIQ_LONG, LIQ_SHORT = 0, 1, 2
 EV_TYPE_OPEN, EV_TYPE_CLOSE, EV_TYPE_SL, EV_TYPE_LIQ = 1, 2, 3, 4
 USDT_NEUT, VOL_NEUT = 0, 1
 
@@ -47,7 +45,7 @@ def backtest_fast(time_arr, z_score, spread_arr, std_arr, bid_1, ask_1, bid_2, a
             thresh_high_in, thresh_high_out, long_possible, short_possible,
             dist_in, dist_out, balance, order_size, qty_method, std_1, std_2,
             fee_rate,  sl_std, sl_dist, sl_method, sl_seconds=0,
-            close_method=0, leverage=1):
+            open_method=0, close_method=0, leverage=1):
 
     n = z_score.shape[0]
     total_balance = balance
@@ -286,13 +284,13 @@ def backtest_fast(time_arr, z_score, spread_arr, std_arr, bid_1, ask_1, bid_2, a
                         sl_block_short = 0
 
             # Прямой способ входа (когда z_score входит в диапазон входа)
-            if dist_in == 0:
+            if open_method == 0:
                 if z < thresh_low_in and long_possible and not sl_block_long:
                     signal = SIG_LONG_OPEN
                 elif z > thresh_high_in and short_possible and not sl_block_short:
                     signal = SIG_SHORT_OPEN
-            # Обратный способ входа (когда z_score выходит из диапазона входа)
-            else:
+            # Обратный способ входа со слежением (порог входа z_score движется за z_score)
+            elif open_method == 1:
                 # --- Long ---
                 if long_possible and not sl_block_long:
                     # Спред только входит в диапазон открытия позиции
@@ -321,6 +319,26 @@ def backtest_fast(time_arr, z_score, spread_arr, std_arr, bid_1, ask_1, bid_2, a
                         short_in_max_value = 0
                         signal = SIG_SHORT_OPEN
                         # print('Входим в шорт', time_arr[i], z)
+            elif open_method == 2:
+                # --- Long ---
+                if long_possible and not sl_block_long:
+                    # Спред только входит в диапазон открытия позиции
+                    if not long_in_min_value and z < thresh_low_in - dist_in:
+                        long_in_min_value = 1
+                    # Если z_score откатывается на dist от максимума, разрешаем открытие позиции
+                    elif long_in_min_value and z > thresh_low_in:
+                        signal = SIG_LONG_OPEN
+                        long_in_min_value = 0
+                # --- Short ---
+                if short_possible and not sl_block_long:
+                    # Спред только входит в диапазон открытия позиции
+                    if not short_in_max_value and z > thresh_high_in + dist_in:
+                        short_in_max_value = 1
+                    # Если z_score откатывается на dist от максимума, разрешаем открытие позиции
+                    elif short_in_max_value and z < thresh_high_in:
+                        short_in_max_value = 0
+                        signal = SIG_SHORT_OPEN
+
 
         # --- Обрабатываем открытую позицию ---
         if pos_side == POS_LONG or pos_side == POS_SHORT:
@@ -393,7 +411,7 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
             thresh_high_in, thresh_high_out, long_possible, short_possible,
             balance, order_size, qty_method, std_1, std_2,
             fee_rate,  sl_std, sl_dist, sl_method=None, sl_seconds=0,
-            close_method='regular', leverage=1, dist_in=0, dist_out=0,
+            open_method='direct', close_method='regular', leverage=1, dist_in=0, dist_out=0,
             verbose=False):
     """
 
@@ -416,6 +434,7 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
     sl_map = {None: 0, 'counter': 1, 'leave': 2}
     qty_map = {'usdt_neutral': USDT_NEUT, 'vol_neutral': VOL_NEUT}
     close_map = {'regular': 0, 'fix': 1}
+    open_map = {'direct': 0, 'trailing': 1, 'strict': 2}
 
     if qty_method == 'vol_neutral' and (std_1 is None or std_2 is None):
         raise Exception('При использовании vol_neutral необходимо задать std_1 и std_2')
@@ -429,7 +448,7 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
             balance=balance, order_size=order_size, qty_method=qty_map[qty_method],
             std_1=std_1, std_2=std_2, fee_rate=fee_rate,
             sl_std=sl_std, sl_dist=sl_dist, sl_method=sl_map[sl_method], sl_seconds=sl_seconds,
-            close_method=close_map[close_method],
+            open_method=open_map[open_method], close_method=close_map[close_method],
             leverage=leverage)
 
     trades_df = pl.DataFrame(res, schema=[

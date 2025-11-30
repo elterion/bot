@@ -65,24 +65,6 @@ def open_position(token_1, token_2, mode, t1_data, t2_data, side_1, side_2, leve
 
         print(f'{ct} [{side_1} open] {act_1} {qty_1} {token_1[:-5]} for {price_1}; {act_2} {qty_2} {token_2[:-5]} for {price_2}')
 
-def close_position(token_1, token_2, t1_data, t2_data, side_1, side_2, db_manager):
-    t1_vol = t1_data['bid_volume_0'][0] if side_1 == 'long' else t1_data['ask_volume_0'][0]
-    t2_vol = t2_data['ask_volume_0'][0] if side_1 == 'long' else t2_data['bid_volume_0'][0]
-
-    current_pairs = db_manager.get_table('pairs', df_type='polars')
-    pair = current_pairs.filter((pl.col('token_1') == token_1) & (pl.col('token_2') == token_2))
-
-    open_qty_1 = pair['qty_1'][0]
-    open_qty_2 = pair['qty_2'][0]
-
-    if t1_vol > open_qty_1 and t2_vol > open_qty_2:
-        db_manager.close_pair_order(token_1, token_2, side_1)
-
-        ct = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        act_1 = 'buy' if side_1 == 'short' else 'sell'
-        act_2 = 'buy' if side_2 == 'short' else 'sell'
-        print(f'{ct} [{side_1} close] {act_1} {open_qty_1} {token_1[:-5]}; {act_2} {open_qty_2} {token_2[:-5]}')
-
 def check_tokens(token_1: str, token_2: str, current_pairs: pl.DataFrame, stop_list: pl.DataFrame) -> bool:
     active_tokens = current_pairs['token_1'].to_list() + current_pairs['token_2'].to_list()
     in_pos = token_1 in active_tokens or token_2 in active_tokens
@@ -96,11 +78,11 @@ def check_tokens(token_1: str, token_2: str, current_pairs: pl.DataFrame, stop_l
     else:
         return True
 
-def get_hist_df(postgre_manager, start_time):
-    hour_1_df = postgre_manager.get_orderbooks(interval='1h', start_date=start_time)
+def get_hist_df(db_manager, start_time):
+    hour_1_df = db_manager.get_orderbooks(interval='1h', start_date=start_time)
     hour_1_df = hour_1_df.with_columns(pl.col('price').alias('avg_price'))
 
-    hour_4_df = postgre_manager.get_orderbooks(interval='4h', start_date=start_time)
+    hour_4_df = db_manager.get_orderbooks(interval='4h', start_date=start_time)
     hour_4_df = hour_4_df.with_columns(pl.col('price').alias('avg_price'))
 
     return hour_4_df, hour_1_df
@@ -184,7 +166,7 @@ def main():
 
     # --- Инициируем менеджеры, работающие с БД ---
     db_params = {'host': host, 'user': user, 'password': password, 'dbname': db_name}
-    postgre_manager = DBManager(db_params)
+    db_manager = DBManager(db_params)
 
     print(f'{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Обновление плечей на бирже ByBit')
     for t1_name, t2_name in token_pairs:
@@ -212,11 +194,11 @@ def main():
             print(f'Контрольное время: {ct}', end='\r')
 
             # --- Устанавливаем heartbeat отметку ---
-            postgre_manager.set_system_state('market_analyzer')
+            db_manager.set_system_state('market_analyzer')
 
             # --- Проверяем работу модуля trades_executor ---
 
-            if ts - postgre_manager.get_system_state('trades_executor') > 20:
+            if ts - db_manager.get_system_state('trades_executor') > 20:
                 print(f'{ct} Потеряна связь с trades_executor!')
                 break
 
@@ -227,14 +209,14 @@ def main():
             try:
                 last_updates_1h = (datetime.now(ZoneInfo("Europe/Moscow")) - hour_1_df[-1]['time'][0]).seconds
             except NameError:
-                hour_4_df, hour_1_df = get_hist_df(postgre_manager, start_time)
+                hour_4_df, hour_1_df = get_hist_df(db_manager, start_time)
                 last_updates_1h = (datetime.now(ZoneInfo("Europe/Moscow")) - hour_1_df[-1]['time'][0]).seconds
 
             if last_updates_1h > 3665: # 1 час 1 минута 5 секунд
-                hour_4_df, hour_1_df = get_hist_df(postgre_manager, start_time)
+                hour_4_df, hour_1_df = get_hist_df(db_manager, start_time)
 
             # --- Текущие данные ---
-            current_data = postgre_manager.get_table('current_ob', df_type='polars')
+            current_data = db_manager.get_table('current_ob', df_type='polars')
             if current_data.is_empty():
                 print(f'{ct} current data is empty!')
                 sleep(5)
@@ -244,15 +226,15 @@ def main():
                     ((pl.col('bid_price_0') + pl.col('ask_price_0')) / 2.0).alias('avg_price')
                 )
 
-            pairs = postgre_manager.get_table('pairs', df_type='polars')
-            stop_list = postgre_manager.get_table('stop_list', df_type='polars')
+            pairs = db_manager.get_table('pairs', df_type='polars')
+            stop_list = db_manager.get_table('stop_list', df_type='polars')
             active_orders = pairs.filter(pl.col('status') == 'active')
 
             # --- Секундный датафрейм для подсчёта среднего значения ---
             end_t = datetime.now().replace(tzinfo=ZoneInfo("Europe/Moscow"))
             st_t = end_t - timedelta(seconds = 30)
 
-            tick_df = postgre_manager.get_tick_ob(start_time=st_t).with_columns(
+            tick_df = db_manager.get_tick_ob(start_time=st_t).with_columns(
                 ((pl.col('bid_price') + pl.col('ask_price')) / 2.0).alias('avg_price')
             ).filter(
                 (pl.col('bid_size') * pl.col('bid_price') > min_order) &
@@ -274,7 +256,7 @@ def main():
 
                 # --- Обновляем открытые пары и текущие ордеры ---
                 if update_positions_flag:
-                    pairs = postgre_manager.get_table('pairs', df_type='polars')
+                    pairs = db_manager.get_table('pairs', df_type='polars')
                     active_orders = pairs.filter(pl.col('status') == 'active')
                     update_positions_flag = False
 
@@ -307,13 +289,13 @@ def main():
                 token_2_hist_price = hist_df.filter(pl.col('token') == token_2).tail(2 * wind + 1)['avg_price'].to_numpy()
 
                 # --- Получаем текущие цены ---
-                t1_curr_data = current_data.filter(pl.col('token') == token_1)
-                t2_curr_data = current_data.filter(pl.col('token') == token_2)
+                t1_data = current_data.filter(pl.col('token') == token_1)
+                t2_data = current_data.filter(pl.col('token') == token_2)
 
                 # --- Проверка на актуальность текущих цен ---
                 try:
-                    t1_ts = t1_curr_data['update_ts'].item()
-                    t2_ts = t2_curr_data['update_ts'].item()
+                    t1_ts = t1_data['update_ts'].item()
+                    t2_ts = t2_data['update_ts'].item()
                 except ValueError: # Ситуация, когда после восстановления соединения не все токены успевают обновиться
                     sleep(1)
                     break
@@ -323,15 +305,15 @@ def main():
 
                 t1_med = np.append(token_1_hist_price, t1_tick_df['avg_price'].median())
                 t2_med = np.append(token_2_hist_price, t2_tick_df['avg_price'].median())
-                t1_curr = np.append(token_1_hist_price, t1_curr_data['avg_price'][0])
-                t2_curr = np.append(token_2_hist_price, t2_curr_data['avg_price'][0])
+                t1_curr = np.append(token_1_hist_price, t1_data['avg_price'][0])
+                t2_curr = np.append(token_2_hist_price, t2_data['avg_price'][0])
 
                 spread_mean, spread_std, zscore = get_dist_zscore(t1_med, t2_med, np.array([wind]))
                 _, _, zscore_curr = get_dist_zscore(t1_curr, t2_curr, np.array([wind]))
                 spread_mean, spread_std, z_score = spread_mean[0], spread_std[0], zscore[0]
                 z_score_curr = zscore_curr[0]
 
-                curr_spread = np.log(t1_curr_data['avg_price'][0]) - np.log(t2_curr_data['avg_price'][0])
+                curr_spread = np.log(t1_data['avg_price'][0]) - np.log(t2_data['avg_price'][0])
                 curr_pair = pairs.filter(
                         (pl.col('token_1') == token_1) & (pl.col('token_2') == token_2)
                     )
@@ -344,17 +326,17 @@ def main():
                 if open_new_orders and pairs.height < max_pairs and check_tokens(token_1, token_2, pairs, stop_list):
                     # Проверяем открытие long-позиции по token_1 и short-позиции по token_2
                     if z_score < low_in and z_score_curr < low_in:
-                        open_position(token_1, token_2, mode, t1_curr_data, t2_curr_data,
+                        open_position(token_1, token_2, mode, t1_data, t2_data,
                                 'long', 'short', leverage, min_order, max_order, fee_rate,
-                                spread_mean, spread_std, coin_information, postgre_manager)
+                                spread_mean, spread_std, coin_information, db_manager)
                         update_positions_flag = True
                         break
 
                     # Проверяем открытие short-позиции по token_1 и long-позиции по token_2
                     if z_score > high_in and z_score_curr > high_in:
-                        open_position(token_1, token_2, mode, t1_curr_data, t2_curr_data,
+                        open_position(token_1, token_2, mode, t1_data, t2_data,
                                 'short', 'long', leverage, min_order, max_order, fee_rate,
-                                spread_mean, spread_std, coin_information, postgre_manager)
+                                spread_mean, spread_std, coin_information, db_manager)
                         update_positions_flag = True
                         break
 
@@ -372,6 +354,8 @@ def main():
 
                     side_1 = opened['side_1'][0]
                     side_2 = opened['side_2'][0]
+                    t1_vol = t1_data['bid_volume_0'][0] if side_1 == 'long' else t1_data['ask_volume_0'][0]
+                    t2_vol = t2_data['ask_volume_0'][0] if side_1 == 'long' else t2_data['bid_volume_0'][0]
 
                     curr_profit_1 = calculate_profit(t1_op, t1_tick_df['avg_price'].median(), q1, side_1)
                     curr_profit_2 = calculate_profit(t2_op, t2_tick_df['avg_price'].median(), q2, side_2)
@@ -379,37 +363,37 @@ def main():
                     curr_profit = curr_profit_1 + curr_profit_2
                     zscore_arr.append((ts, 'bybit', token_1, token_2, curr_profit, z_score, fixed_z_score, curr_spread))
 
-
                     # --- Стоп-лосс по профиту ---
                     if curr_profit < -sl_profit_ratio * 2 * max_order:
                         print(f'{ct} {token_1} - {token_2} STOP-LOSS by profit!')
-                        close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
-                        postgre_manager.add_pair_to_stop_list(token_1, token_2)
+                        db_manager.close_pair_order(token_1, token_2, side_1)
+                        db_manager.add_pair_to_stop_list(token_1, token_2)
                         update_positions_flag = True
                         break
-                    # --- Стоп-лосс при z_score больше 5 ---
+                    # --- Стоп-лосс по z_score ---
                     if abs(fixed_z_score) > sl_spread_std:
                         print(f'{ct} {token_1} - {token_2} STOP-LOSS by z_score!')
-                        close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
-                        postgre_manager.add_pair_to_stop_list(token_1, token_2)
+                        db_manager.close_pair_order(token_1, token_2, side_1)
+                        db_manager.add_pair_to_stop_list(token_1, token_2)
                         update_positions_flag = True
                         break
 
-                    # --- Выходим из лонг позиции, если позволяют условия ---
-                    if side_1 == 'long' and z_score > high_out and z_score_curr > high_out:
-                        close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
-                        update_positions_flag = True
-                        break
-
-                    # --- Выходим из шорт позиции, если позволяют условия ---
-                    elif side_1 == 'short' and z_score < low_out and z_score_curr < low_out:
-                        close_position(token_1, token_2, t1_curr_data, t2_curr_data, side_1, side_2, postgre_manager)
-                        update_positions_flag = True
-                        break
+                    # --- Выходим из позиции, если позволяют условия ---
+                    if t1_vol > q1 and t2_vol > q2:
+                        if side_1 == 'long' and z_score > high_out and z_score_curr > high_out:
+                            db_manager.close_pair_order(token_1, token_2, side_1)
+                            print(f'{ct} [long close] sell {q1} {token_1}; buy {q2} {token_2}')
+                            update_positions_flag = True
+                            break
+                        elif side_1 == 'short' and z_score < low_out and z_score_curr < low_out:
+                            db_manager.close_pair_order(token_1, token_2, side_1)
+                            print(f'{ct} [short close] buy {q1} {token_1}; sell {q2} {token_2}')
+                            update_positions_flag = True
+                            break
 
             zscore_upd_time = int(datetime.timestamp(datetime.now()))
             if zscore_upd_time - last_zscore_update_time >= 10:
-                postgre_manager.add_data_to_zscore_history(zscore_arr)
+                db_manager.add_data_to_zscore_history(zscore_arr)
                 last_zscore_update_time = zscore_upd_time
 
             sleep(0.5)

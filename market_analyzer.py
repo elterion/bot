@@ -366,14 +366,14 @@ def main():
                     # --- Стоп-лосс по профиту ---
                     if curr_profit < -sl_profit_ratio * 2 * max_order:
                         print(f'{ct} {token_1} - {token_2} STOP-LOSS by profit!')
-                        db_manager.close_pair_order(token_1, token_2, side_1)
+                        db_manager.close_pair_order(token_1, token_2, side_1, 'sl_profit')
                         db_manager.add_pair_to_stop_list(token_1, token_2)
                         update_positions_flag = True
                         break
                     # --- Стоп-лосс по z_score ---
                     if abs(fixed_z_score) > sl_spread_std:
                         print(f'{ct} {token_1} - {token_2} STOP-LOSS by z_score!')
-                        db_manager.close_pair_order(token_1, token_2, side_1)
+                        db_manager.close_pair_order(token_1, token_2, side_1, 'sl_zscore')
                         db_manager.add_pair_to_stop_list(token_1, token_2)
                         update_positions_flag = True
                         break
@@ -381,12 +381,12 @@ def main():
                     # --- Выходим из позиции, если позволяют условия ---
                     if t1_vol > q1 and t2_vol > q2:
                         if side_1 == 'long' and z_score > high_out and z_score_curr > high_out:
-                            db_manager.close_pair_order(token_1, token_2, side_1)
+                            db_manager.close_pair_order(token_1, token_2, side_1, 'target')
                             print(f'{ct} [long close] sell {q1} {token_1}; buy {q2} {token_2}')
                             update_positions_flag = True
                             break
                         elif side_1 == 'short' and z_score < low_out and z_score_curr < low_out:
-                            db_manager.close_pair_order(token_1, token_2, side_1)
+                            db_manager.close_pair_order(token_1, token_2, side_1, 'target')
                             print(f'{ct} [short close] buy {q1} {token_1}; sell {q2} {token_2}')
                             update_positions_flag = True
                             break

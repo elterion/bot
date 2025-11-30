@@ -284,19 +284,20 @@ class DBManager:
                 open_price_1, open_price_2, close_price_1, close_price_2, fee_1, fee_2,
                 leverage, pnl_1, pnl_2, profit, mode))
 
-    def close_pair_order(self, token_1, token_2, side_1):
-        """Обновляет статус ордера на 'closing' по ключу (token_1, token_2, side_1)"""
+    def close_pair_order(self, token_1, token_2, side_1, reason):
+        """Обновляет статус ордера на по ключу (token_1, token_2, side_1)"""
+
         query = """
             UPDATE pairs
-            SET status = 'closing'
+            SET status = %s
             WHERE token_1 = %s AND token_2 = %s AND side_1 = %s
         """
 
         with self.conn.cursor() as cursor:
-            cursor.execute(query, (token_1, token_2, side_1))
+            cursor.execute(query, (reason, token_1, token_2, side_1))
 
     def complete_pair_order(self, token_1, token_2, close_price_1, close_price_2,
-                            close_fee_1, close_fee_2):
+                            close_fee_1, close_fee_2, reason):
         with self.conn.cursor() as cursor:
             cursor.execute("""
                 SELECT token_1, token_2, created_at, side_1, side_2, qty_1, qty_2,
@@ -343,14 +344,14 @@ class DBManager:
         query = """
             INSERT INTO trading_history (token_1, token_2, open_time, close_time, side_1, side_2, qty_1, qty_2,
                 open_price_1, open_price_2, close_price_1, close_price_2, fee_1, fee_2,
-                leverage, pnl_1, pnl_2, profit, mode)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                leverage, pnl_1, pnl_2, profit, mode, reason)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
         with self.conn.cursor() as cursor:
             cursor.execute(query, (t1, t2, open_time, close_time, side_1, side_2, qty_1, qty_2,
                 open_price_1, open_price_2, close_price_1, close_price_2, fee_1, fee_2,
-                leverage, pnl_1, pnl_2, profit, mode))
+                leverage, pnl_1, pnl_2, profit, mode, reason))
 
         self.delete_pair_order(token_1, token_2)
 

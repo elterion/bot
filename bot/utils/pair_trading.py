@@ -5,6 +5,7 @@ from numba import njit
 from bot.utils.coins import get_step_info
 import math
 import ast
+from datetime import datetime, timedelta
 
 def round_down(value: float, dp: float):
     return round(math.floor(value / dp) * dp, 6)
@@ -765,3 +766,27 @@ def lr_coefs(y):
     k = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x ** 2)
     b = (sum_y - k * sum_x) / n
     return k, b
+
+def load_data(token_1, token_2, valid_time, end_time, tf, wind, db_manager):
+        """
+        Args:
+            token_1, token_2 - Названия токенов
+            valid_time - время в формате datetime.datetime, с которого начинается непосредственно бектест
+            end_time   - время окончания бектеста в формате datetime.datetime
+            params - dict() с параметрами
+        """
+        train_length = int(tf[0]) * wind * 2 + 1
+        start_time = valid_time - timedelta(days=train_length)
+        start_ts   = int(datetime.timestamp(valid_time))
+
+        df_1 = db_manager.get_tick_ob(token=token_1 + '_USDT',
+                                         start_time=start_time,
+                                         end_time=end_time)
+        df_2 = db_manager.get_tick_ob(token=token_2 + '_USDT',
+                                         start_time=start_time,
+                                         end_time=end_time)
+        df = make_df_from_orderbooks(df_1, df_2, token_1, token_2, start_time=start_time)
+        tick_df = make_df_from_orderbooks(df_1, df_2, token_1, token_2, start_time=start_time)
+        agg_df = make_trunc_df(df, timeframe=tf, token_1=token_1, token_2=token_2, method='triple')
+
+        return tick_df, agg_df

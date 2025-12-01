@@ -7,7 +7,7 @@ from numba.typed import List as NumbaList
 import random
 
 from bot.analysis.strategy_analysis import analyze_strategy
-from bot.utils.pair_trading import calculate_profit, get_qty
+from bot.utils.pair_trading import calculate_profit, get_qty, get_dist_zscore
 
 from bot.core.db.postgres_manager import DBManager
 from bot.config.credentials import host, user, password, db_name
@@ -450,7 +450,7 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
     sl_map = {None: 0, 'counter': 1, 'leave': 2}
     qty_map = {'usdt_neutral': USDT_NEUT, 'vol_neutral': VOL_NEUT}
     close_map = {'direct': 0, 'fix': 1}
-    open_map = {'direct': 0, 'trailing': 1, 'strict': 2}
+    open_map = {'direct': 0, 'reverse_dynamic': 1, 'reverse_static': 2}
 
     if qty_method == 'vol_neutral' and (std_1 is None or std_2 is None):
         raise Exception('При использовании vol_neutral необходимо задать std_1 и std_2')

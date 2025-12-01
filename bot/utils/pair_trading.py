@@ -6,6 +6,8 @@ from bot.utils.coins import get_step_info
 import math
 import ast
 from datetime import datetime, timedelta
+from hurst import compute_Hc
+from bot.indicators.rsi import rsi
 
 def round_down(value: float, dp: float):
     return round(math.floor(value / dp) * dp, 6)
@@ -774,3 +776,250 @@ def load_data(token_1, token_2, valid_time, end_time, tf, wind, db_manager):
         agg_df = make_trunc_df(tick_df, timeframe=tf, token_1=token_1, token_2=token_2, method='triple')
 
         return tick_df, agg_df
+
+def get_dpr_dz(profit_arr, z_score_arr):
+    mask = (~np.isnan(profit_arr)) & (~np.isnan(z_score_arr))
+
+    dz = np.diff(z_score_arr[mask])
+    dpr = np.diff(profit_arr[mask])
+
+    eps = 0.000001
+    mask = (np.abs(dz) >= eps) & (np.abs(dpr) >= eps)
+    mask_pos = (np.abs(dz) >= eps) & (np.abs(dpr) >= eps) & (dz > 0)
+    mask_neg = (np.abs(dz) >= eps) & (np.abs(dpr) >= eps) & (dz < 0)
+
+    dpr_dz = dpr[mask] / dz[mask]
+    dpr_dz_pos = dpr[mask_pos] / dz[mask_pos]
+    dpr_dz_neg = dpr[mask_neg] / dz[mask_neg]
+
+    return dpr_dz.mean(), dpr_dz_pos.mean(), dpr_dz_neg.mean()
+
+def calculate_tls_beta(price_x, price_y):
+    """
+    Считает Beta методом Total Least Squares (ODR).
+    Подходит для Дистанционного метода и пар с шумом в обеих ногах.
+    price_x: массив цен токена 2 (независимая переменная, 'IMX')
+    price_y: массив цен токена 1 (зависимая переменная, 'DRIFT')
+    """
+    # Переходим к логарифмам
+    x = np.log(price_x)
+    y = np.log(price_y)
+
+    # Центрируем данные (убираем среднее, чтобы найти наклон)
+    x_mean = np.mean(x)
+    y_mean = np.mean(y)
+    x_centered = x - x_mean
+    y_centered = y - y_mean
+
+    # Формируем матрицу данных [N, 2]
+    data = np.vstack([x_centered, y_centered]).T
+
+    # Сингулярное разложение (SVD) - это сердце TLS
+    # Мы ищем направление наименьшей дисперсии (перпендикуляр к линии тренда)
+    _, _, vh = np.linalg.svd(data)
+
+    # Последняя строка Vh - это вектор нормали к линии (a*x + b*y = c)
+    # Нам нужен наклон beta = -a/b
+    # vh имеет вид [[v_xx, v_xy], [v_yx, v_yy]]
+    # Наш вектор нормали - это последняя строка (индекс -1)
+
+    normal_vector = vh[-1]
+
+    # Коэффициенты a и b уравнения ax + by = 0
+    a = normal_vector[0]
+    b = normal_vector[1]
+
+    # Beta = -a / b
+    beta_tls = -a / b
+
+    return beta_tls
+
+def get_profit_arr(tick_df, agg_df, token_1, token_2, side_1, side_2, wind, coin_information):
+    """
+        В tick_df передаётся тиковый датафрейм, отсечённый по моменту входа в позицию.
+        agg_df - также отсечённый df.
+    """
+    open_time = tick_df['time'][-1]
+    time_12h = open_time - timedelta(hours=12)
+    time_wind = open_time - timedelta(hours=wind)
+    ts_12h = int(datetime.timestamp(time_12h))
+    ts_wind = int(datetime.timestamp(time_wind))
+
+    open_row_12 = tick_df.filter(pl.col('ts') == ts_12h)
+    open_row_wind = tick_df.filter(pl.col('ts') == ts_wind)
+
+    t1_op_12 = open_row_12[token_1][0]
+    t2_op_12 = open_row_12[token_2][0]
+    t1_op_w = open_row_wind[token_1][0]
+    t2_op_w = open_row_wind[token_2][0]
+
+    q1_12, q2_12 = get_qty(token_1, token_2, t1_op_12, t2_op_12, None, coin_information, 100, method='usdt_neutral')
+    q1_w, q2_w = get_qty(token_1, token_2, t1_op_w, t2_op_w, None, coin_information, 100, method='usdt_neutral')
+
+    tss = tick_df['ts'].to_numpy()
+    price1 = tick_df[token_1].to_numpy()
+    price2 = tick_df[token_2].to_numpy()
+
+    hist_ts = agg_df['ts'].to_numpy()
+    hist_t1 = agg_df[token_1].to_numpy()
+    hist_t2 = agg_df[token_2].to_numpy()
+
+    nrows = tss.shape[0]
+    t_arr = np.full(nrows, np.nan)
+    ts_arr = np.full(nrows, np.nan)
+    z_score_arr = np.full(nrows, np.nan)
+    profit_12_arr = np.full(nrows, np.nan)
+    profit_w_arr = np.full(nrows, np.nan)
+
+    for i in range(nrows):
+        t1_price = price1[i]
+        t2_price = price2[i]
+
+        # Выберем из агрегированных цен только те, которые были до текущего момента
+        mask = hist_ts < tss[i]
+        t1_hist = hist_t1[mask][-wind:]
+        t2_hist = hist_t2[mask][-wind:]
+
+        # Сформируем массивы, в которых к историческим данным в конец добавим текущую медианную цену, и посчитаем z_score
+        t1_arr = np.append(t1_hist, t1_price)
+        t2_arr = np.append(t2_hist, t2_price)
+
+        _, _, _, zscore = get_dist_zscore(t1_arr, t2_arr, np.array([wind]))
+        curr_profit_1w = calculate_profit(t1_op_w, t1_price, q1_w, side_1)
+        curr_profit_2w = calculate_profit(t2_op_w, t2_price, q2_w, side_2)
+        curr_profit_w = curr_profit_1w + curr_profit_2w
+
+        if tss[i] > ts_12h:
+            curr_profit_1_12 = calculate_profit(t1_op_12, t1_price, q1_12, side_1)
+            curr_profit_2_12 = calculate_profit(t2_op_12, t2_price, q2_12, side_2)
+            curr_profit_12 = curr_profit_1_12 + curr_profit_2_12
+            profit_12_arr[i] = curr_profit_12
+
+        ts_arr[i] = tss[i]
+        z_score_arr[i] = zscore[0]
+        profit_w_arr[i] = curr_profit_w
+
+    return ts_arr, z_score_arr, profit_w_arr, profit_12_arr
+
+def get_open_time_stats(token_1, token_2, open_time, tick_df, agg_df, lr_spread, params, coin_information):
+    tf = params['tf']
+    wind = params['wind']
+    side_1 = params['side_1']
+    side_2 = params['side_2']
+
+    stats = pl.read_parquet('./data/pair_selection/all_pairs.parquet').filter(
+                (pl.col('coin1') == token_1) & (pl.col('coin2') == token_2)
+            )
+
+    tick_hist = tick_df.filter(pl.col('time') < open_time).tail(wind * 12 * 60)
+    agg_hist = agg_df.filter(pl.col('time') < open_time).tail(wind)
+
+    agg_df_wind = agg_hist.with_columns([
+        pl.col(token_1).pct_change().std().alias("vol_1"),
+        pl.col(token_2).pct_change().std().alias("vol_2"),
+        pl.col('log_spread').mean().alias('mean')
+    ])
+
+    agg_df_12 = agg_hist.tail(12).with_columns([
+        pl.col(token_1).pct_change().std().alias("vol_1"),
+        pl.col(token_2).pct_change().std().alias("vol_2"),
+        pl.col('log_spread').mean().alias('mean')
+    ])
+
+    std_1 = stats['std_1'][0]
+    std_2 = stats['std_2'][0]
+    beta_1 = stats['beta_1'][0]
+    beta_2 = stats['beta_2'][0]
+    pv_1 = stats['pv_1'][0]
+    pv_2 = stats['pv_2'][0]
+    tls_beta = stats['tls_beta'][0]
+    coint = stats['coint'][0]
+    hedge_r = stats['hedge_r'][0]
+
+    mean_wind = agg_df_wind["mean"][0]
+    std_1_wind = agg_df_wind["vol_1"][0]
+    std_2_wind = agg_df_wind["vol_2"][0]
+    mean_12 = agg_df_12["mean"][0]
+    std_1_12 = agg_df_12["vol_1"][0]
+    std_2_12 = agg_df_12["vol_2"][0]
+    mean_diff = (mean_12 / mean_wind - 1) * 100
+
+    tls_beta_wind = calculate_tls_beta(agg_df_wind[token_1].to_numpy(), agg_df_wind[token_2].to_numpy())
+    tls_beta_12 = calculate_tls_beta(agg_df_12[token_1].to_numpy(), agg_df_12[token_2].to_numpy())
+
+    spread_20m = make_trunc_df(tick_hist, '20m', token_1, token_2, method="triple").with_columns(
+            (pl.col(token_1).log() - pl.col(token_2).log()).alias('log_spread')
+        ).filter(pl.col('time') < open_time).tail(3*wind)
+    H_wind, _, _ = compute_Hc(spread_20m['log_spread'])
+
+    spread_5m = make_trunc_df(tick_hist, '5m', token_1, token_2, method="triple").with_columns(
+            (pl.col(token_1).log() - pl.col(token_2).log()).alias('log_spread')
+        ).filter(pl.col('time') < open_time).tail(12 * 12)
+    H_12, _, _ = compute_Hc(spread_5m['log_spread'])
+
+    open_time_tick_df = tick_df.select('time', 'ts', token_1, token_2, 'log_spread').filter(pl.col('time') < open_time).tail(1)
+    open_time_1h_df = agg_hist.vstack(open_time_tick_df)
+    spread_rsi_1h = rsi(open_time_1h_df, window=14, col_name='log_spread')['rsi'][-1]
+    spread_rsi_5m = rsi(spread_5m, window=24, col_name='log_spread')['rsi'][-1]
+
+    rsi_t1_5m = rsi(spread_5m, window=24, col_name=token_1)['rsi'][-1]
+    rsi_t2_5m = rsi(spread_5m, window=24, col_name=token_2)['rsi'][-1]
+    rsi_t1_1h = rsi(open_time_1h_df, window=14, col_name=token_1)['rsi'][-1]
+    rsi_t2_1h = rsi(open_time_1h_df, window=14, col_name=token_2)['rsi'][-1]
+
+    ts_arr, z_score_arr, profit_w_arr, profit_12_arr = get_profit_arr(tick_hist,
+                agg_hist, token_1, token_2, side_1, side_2, wind, coin_information)
+    rel_mean_12, rel_pos_12, rel_neg_12 = get_dpr_dz(profit_12_arr, z_score_arr)
+    rel_mean_w, rel_pos_w, rel_neg_w = get_dpr_dz(profit_w_arr, z_score_arr)
+
+    tick_spread_wind = tick_hist['log_spread'].tail(wind * 12 * 60).to_numpy()
+    tick_spread_12 = tick_hist['log_spread'].tail(12 * 12 * 60).to_numpy()
+    k_wind, b_wind = lr_coefs(tick_spread_wind)
+    k_12, b_12 = lr_coefs(tick_spread_12)
+    y_end_wind = k_wind * (len(tick_spread_wind) - 1) + b_wind
+    y_end_12 = k_12 * (len(tick_spread_12) - 1) + b_12
+    trend_wind = (y_end_wind - b_wind) / b_wind * 100
+    trend_12 = (y_end_12 - b_12) / b_12 * 100
+
+    half_life_log_spread = calculate_half_life(tick_df['log_spread'].to_numpy()) / 12 / 60
+    half_life_lr_spread = calculate_half_life(lr_spread) / 12 / 60
+
+    return {
+        'std_1_180d': std_1,
+        'std_2_180d': std_2,
+        'beta_1_180d': beta_1,
+        'beta_2_180d': beta_2,
+        'pv_1': pv_1,
+        'pv_2': pv_2,
+        'tls_beta_180d': tls_beta,
+        'coint_180d': coint,
+        'johansen_beta_180d': hedge_r,
+        'mean_wind': mean_wind,          # Среднее значение спреда за последние wind часов
+        'std_1_wind': std_1_wind,        # Стандартное отклонение спреда за последние wind часов
+        'std_2_wind': std_2_wind,
+        'mean_12h': mean_12,              # Среднее значение спреда за последние 12 часов
+        'std_1_12h': std_1_12,
+        'std_2_12h': std_2_12,
+        'mean_diff': mean_diff,          # Изменение среднего значения между 12 часами и wind часами в %
+        'tls_beta_wind': tls_beta_wind,
+        'tls_beta_12h': tls_beta_12,
+        'hurst_wind': H_wind,            # Показатель Хёрста за wind часов
+        'hurst_12h': H_12,                # Показатель Хёрста за 12 часов
+        'spread_rsi_5m': spread_rsi_5m,  # Индикатор RSI на агрегированном по 5 мин спреде
+        'spread_rsi_1h': spread_rsi_1h,
+        'rsi_t1_5m': rsi_t1_5m,          # Индикатор RSI на агрегированном по 5 мин цене токена_1
+        'rsi_t2_5m': rsi_t2_5m,
+        'rsi_t1_1h': rsi_t1_1h,          # Индикатор RSI на агрегированном по 1 часу цене токена_1
+        'rsi_t2_1h': rsi_t2_1h,
+        'profit_sensitivity_12h_mean': rel_mean_12, # Изменение профита на единицу изменения z_score за последние 12 часов (среднее)
+        'profit_sensitivity_12h_pos': rel_pos_12,   # Только положительные изменения z_score
+        'profit_sensitivity_12h_neg': rel_neg_12,   # Только отрицательные изменения z_score
+        'profit_sensitivity_wind_mean': rel_mean_w,
+        'profit_sensitivity_wind_pos': rel_pos_w,
+        'profit_sensitivity_wind_neg': rel_neg_w,
+        'trend_wind': trend_wind,         # Отношение конца регрессионной прямой к началу за wind часов
+        'trend_12h': trend_12,
+        'half_life_log_spread': half_life_log_spread,
+        'half_life_lr_spread': half_life_lr_spread
+
+    }

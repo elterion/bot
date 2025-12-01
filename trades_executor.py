@@ -56,7 +56,7 @@ def main():
             # Загружаем данные
             pairs = postgre_manager.get_table('pairs', df_type='polars')
             pending_orders = pairs.filter(pl.col('status').is_in(['opening', 'target',
-                                                'sl_profit', 'sl_zscore']))
+                                                'sl_profit', 'sl_zscore', 'manual']))
             active_orders = pairs.filter(pl.col('status') == 'active')
             token_list = pairs['token_1'].to_list() + pairs['token_2'].to_list()
 
@@ -137,7 +137,7 @@ def main():
                     active_positions = trade_manager.get_all_positions(market_type='linear')
                     pairs = postgre_manager.get_table('pairs', df_type='polars')
                     pending_orders = pairs.filter(pl.col('status').is_in(['opening', 'target',
-                                                'sl_profit', 'sl_zscore']))
+                                                'sl_profit', 'sl_zscore', 'manual']))
                     active_orders = pairs.filter(pl.col('status') == 'active')
 
             # ------------ Обработка открытия и закрытия ордеров ------------
@@ -188,7 +188,7 @@ def main():
                     sleep(0.5)
                     active_positions = trade_manager.get_all_positions(market_type='linear')
 
-                elif status in ('target', 'sl_profit', 'sl_zscore'):
+                elif status in ('target', 'sl_profit', 'sl_zscore', 'manual'):
                     sl_1, sl_2 = None, None
                     act_1 = 'Buy' if side_1 == 'short' else 'Sell'
                     act_2 = 'Buy' if side_2 == 'short' else 'Sell'

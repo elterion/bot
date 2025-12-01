@@ -16,9 +16,9 @@ db_manager = DBManager(db_params)
 
 SIG_NONE, SIG_LONG_OPEN, SIG_SHORT_OPEN, SIG_LONG_CLOSE, SIG_SHORT_CLOSE = 0, 1, 2, 3, 4
 POS_NONE, POS_LONG, POS_SHORT = 0, 1, 2
-REASON_NONE, REASON_THRESHOLD, REASON_STOPLOSS, REASON_LIQ = 0, 1, 2, 3
+REASON_NONE, REASON_THRESHOLD, REASON_STOPLOSS, REASON_LIQ, REASON_FORCE = 0, 1, 2, 3, 4
 LIQ_NONE, LIQ_LONG, LIQ_SHORT = 0, 1, 2
-EV_TYPE_OPEN, EV_TYPE_CLOSE, EV_TYPE_SL, EV_TYPE_LIQ = 1, 2, 3, 4
+EV_TYPE_OPEN, EV_TYPE_CLOSE, EV_TYPE_SL, EV_TYPE_LIQ, EV_TYPE_FORCE = 1, 2, 3, 4, 5
 USDT_NEUT, VOL_NEUT = 0, 1
 
 try:
@@ -40,12 +40,12 @@ def _round(value, dp):
     return np.floor(value / dp) * dp
 
 @njit(fastmath=True, cache=True)
-def backtest_fast(time_arr, z_score, spread_arr, std_arr, bid_1, ask_1, bid_2, ask_2,
+def backtest_fast(time_arr, z_score, currspr_arr, spread_arr, std_arr, bid_1, ask_1, bid_2, ask_2,
             dp_1, dp_2, thresh_low_in, thresh_low_out,
             thresh_high_in, thresh_high_out, long_possible, short_possible,
             dist_in, dist_out, balance, order_size, qty_method, std_1, std_2,
             fee_rate,  sl_std, sl_dist, sl_method, sl_seconds=0,
-            open_method=0, close_method=0, leverage=1):
+            open_method=0, close_method=0, leverage=1, force_close=0):
 
     n = z_score.shape[0]
     total_balance = balance
@@ -74,6 +74,8 @@ def backtest_fast(time_arr, z_score, spread_arr, std_arr, bid_1, ask_1, bid_2, a
 
     out = NumbaList()
     events = NumbaList()
+
+    last_chance_time = time_arr[-2] # Timestamp команды на принудительное закрытие позы
 
     for i in range(n):
         z = z_score[i]
@@ -235,7 +237,12 @@ def backtest_fast(time_arr, z_score, spread_arr, std_arr, bid_1, ask_1, bid_2, a
             total_profit = profit_1 + profit_2
             total_balance += total_profit
 
-            reas = EV_TYPE_CLOSE if reason == REASON_THRESHOLD else EV_TYPE_SL
+            if reason == REASON_THRESHOLD:
+                reas = EV_TYPE_CLOSE
+            elif reason == REASON_FORCE:
+                reas = EV_TYPE_FORCE
+            else:
+                reas = EV_TYPE_SL
 
             events.append((reas, open_time, time_arr[i], qty_1, qty_2,
                            open_price_1, price_1, open_price_2, price_2, pos_side,
@@ -344,8 +351,7 @@ def backtest_fast(time_arr, z_score, spread_arr, std_arr, bid_1, ask_1, bid_2, a
         if pos_side == POS_LONG or pos_side == POS_SHORT:
             avg_1 = (bid_1[i] + ask_1[i]) / 2.0
             avg_2 = (bid_2[i] + ask_2[i]) / 2.0
-            curr_spr = np.log(avg_1) - np.log(avg_2)
-            fixed_z_score = (curr_spr - fixed_mean) / fixed_std
+            fixed_z_score = (currspr_arr[i] - fixed_mean) / fixed_std
 
             out_condition = z if close_method == 0 else fixed_z_score
 
@@ -366,6 +372,11 @@ def backtest_fast(time_arr, z_score, spread_arr, std_arr, bid_1, ask_1, bid_2, a
 
             # --- Проверяем условие выхода из сделки ---
             if pos_side == POS_SHORT:
+                # Принудительное закрытие позы по завершению бектеста
+                if force_close and time_arr[i] == last_chance_time:
+                    signal = SIG_SHORT_CLOSE
+                    reason = REASON_FORCE
+
                 # Прямой способ (когда z_score входит в диапазон выхода)
                 if not dist_out:
                     if out_condition < thresh_low_out:
@@ -386,6 +397,10 @@ def backtest_fast(time_arr, z_score, spread_arr, std_arr, bid_1, ask_1, bid_2, a
                         short_out_min_value = 0
 
             elif pos_side == POS_LONG:
+                if force_close and time_arr[i] == last_chance_time:
+                    signal = SIG_LONG_CLOSE
+                    reason = REASON_FORCE
+
                 # Прямой способ (когда z_score входит в диапазон выхода)
                 if not dist_out:
                     if out_condition > thresh_high_out:
@@ -412,7 +427,7 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
             balance, order_size, qty_method, std_1, std_2,
             fee_rate,  sl_std, sl_dist, sl_method=None, sl_seconds=0,
             open_method='direct', close_method='direct', leverage=1, dist_in=0, dist_out=0,
-            verbose=False):
+            force_close=False, verbose=False):
     """
 
 
@@ -425,6 +440,7 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
     ask_1 = df[f"{token_1}_ask_price"].to_numpy()
     bid_2 = df[f"{token_2}_bid_price"].to_numpy()
     ask_2 = df[f"{token_2}_ask_price"].to_numpy()
+    currspr_arr =df["spread"].to_numpy()
     spread_arr = df["spread_mean"].to_numpy()
     std_arr = df["spread_std"].to_numpy()
 
@@ -439,7 +455,9 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
     if qty_method == 'vol_neutral' and (std_1 is None or std_2 is None):
         raise Exception('При использовании vol_neutral необходимо задать std_1 и std_2')
 
-    res, events = backtest_fast(time_arr, z, spread_arr, std_arr, bid_1, ask_1, bid_2, ask_2,
+    force_close = 1 if force_close else 0
+
+    res, events = backtest_fast(time_arr, z, currspr_arr, spread_arr, std_arr, bid_1, ask_1, bid_2, ask_2,
             dp_1, dp_2,
             thresh_low_in=thresh_low_in, thresh_high_in=thresh_high_in,
             thresh_low_out=thresh_low_out, thresh_high_out=thresh_high_out,
@@ -449,7 +467,7 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
             std_1=std_1, std_2=std_2, fee_rate=fee_rate,
             sl_std=sl_std, sl_dist=sl_dist, sl_method=sl_map[sl_method], sl_seconds=sl_seconds,
             open_method=open_map[open_method], close_method=close_map[close_method],
-            leverage=leverage)
+            leverage=leverage, force_close=force_close)
 
     trades_df = pl.DataFrame(res, schema=[
             "open_ts", "close_ts", "qty_1", "qty_2", "open_price_1", "close_price_1",
@@ -504,6 +522,8 @@ Profit: {profit:.2f}.')
                 print(f"[STOP LOSS!] {close_date}. Profit: {total_profit:.2f}")
             elif etype == 4:
                 print(f"[LIQUIDATION!] {close_date}. Profit: {total_profit:.2f}")
+            elif etype == 5:
+                print(f"[FORCE] {close_date}. Profit: {total_profit:.2f}")
 
     return trades_df
 

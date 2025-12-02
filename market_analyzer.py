@@ -346,6 +346,11 @@ def main(update_leverage):
                         elif (token_1, token_2) in curr_tracking_in and abs(lr_zscore) < thresh_in and len(pairs) >= max_pairs:
                             curr_tracking_in.pop((token_1, token_2))
                             print(f'{ct} Delete from tracking: {token_1} - {token_2}; z_score: {lr_zscore:.2f}')
+                        # Если z_score возвращается ниже отметки in_, но z_score, посчитанный вторым методом, слишком плохой,
+                        #   удаляем токен из треккинга
+                        elif (token_1, token_2) in curr_tracking_in and abs(lr_zscore) < thresh_in and abs(dist_zscore) < min_alt_zscore:
+                            curr_tracking_in.pop((token_1, token_2))
+                            print(f'{ct} Delete from tracking: {token_1} - {token_2}; z_score: {lr_zscore:.2f}, z_score_2: {dist_zscore:.2f}')
                         # Если z_score возвращается ниже отметки in_, входим в позицию
                         elif (token_1, token_2) in curr_tracking_in and abs(lr_zscore) < thresh_in:
                             if lr_zscore > low_in and dist_zscore < -min_alt_zscore:
@@ -358,11 +363,7 @@ def main(update_leverage):
                                     'short', 'long', leverage, min_order, max_order, fee_rate,
                                     lr_spr_mean, lr_spr_std, coin_information, db_manager)
                                 update_positions_flag = True
-                        # Если z_score возвращается ниже отметки in_, но z_score, посчитанный вторым методом, слишком плохой,
-                        #   удаляем токен из треккинга
-                        elif (token_1, token_2) in curr_tracking_in and abs(lr_zscore) < thresh_in and abs(dist_zscore) < min_alt_zscore:
-                            curr_tracking_in.pop((token_1, token_2))
-                            print(f'{ct} Delete from tracking: {token_1} - {token_2}; z_score: {lr_zscore:.2f}, z_score_2: {dist_zscore:.2f}')
+
 
 
                     # ----- Прямой вход в позицию при пересечении уровня входа -----

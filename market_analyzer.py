@@ -364,6 +364,7 @@ def main(update_leverage):
                                     lr_spr_mean, lr_spr_std, coin_information, db_manager)
                                 update_positions_flag = True
 
+                            curr_tracking_in.pop((token_1, token_2))
 
 
                     # ----- Прямой вход в позицию при пересечении уровня входа -----

@@ -88,18 +88,23 @@ class DBManager:
             Moscow_TZ = timezone(timedelta(hours=3))
             created_at = datetime.now(Moscow_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
-        query = """
-        INSERT INTO pairs (token_1, token_2, created_at, mode, side_1, side_2, qty_1, qty_2,
-        open_price_1, open_price_2, usdt_1, usdt_2, leverage, rpnl_1, rpnl_2, upnl_1, upnl_2,
-        profit_1, profit_2, profit, status, fixed_mean, fixed_std)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, 0, 0, 0, 0, 0, %s, %s, %s)
+        if mode == 'demo':
+            table_name = 'pairs_test'
+        elif mode == 'real':
+            table_name = 'pairs'
+
+        query = f"""
+            INSERT INTO {table_name} (token_1, token_2, created_at, mode, side_1, side_2, qty_1, qty_2,
+            open_price_1, open_price_2, usdt_1, usdt_2, leverage, rpnl_1, rpnl_2, upnl_1, upnl_2,
+            profit_1, profit_2, profit, status, fixed_mean, fixed_std)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, 0, 0, 0, 0, 0, %s, %s, %s)
         """
 
         with self.conn.cursor() as cursor:
             cursor.execute(query, (token_1, token_2, created_at, mode, side_1, side_2, qty_1, qty_2,
                                    price_1, price_2, usdt_1, usdt_2, leverage, status, fixed_mean, fixed_std))
 
-    def update_pairs(self, pairs_data):
+    def update_pairs(self, pairs_data, mode):
         """
         Пакетно обновляет записи в таблице pairs за один SQL-запрос.
 
@@ -136,8 +141,13 @@ class DBManager:
         >>> db_manager.update_pairs_batch(pairs_data)
         """
 
-        query = """
-            UPDATE pairs
+        if mode == 'demo':
+            table_name = 'pairs_test'
+        elif mode == 'real':
+            table_name = 'pairs'
+
+        query = f"""
+            UPDATE {table_name}
             SET rpnl_1 = %s,
                 rpnl_2 = %s,
                 upnl_1 = %s,
@@ -164,10 +174,15 @@ class DBManager:
         with self.conn.cursor() as cursor:
             cursor.executemany(query, batch_data)
 
-    def commit_pair_order(self, token_1, token_2, open_price_1, open_price_2):
+    def commit_pair_order(self, mode, token_1, token_2, open_price_1, open_price_2):
         """Обновляет статус ордера на 'active' по ключу (token_1, token_2, side)"""
-        query = """
-            UPDATE pairs
+        if mode == 'demo':
+            table_name = 'pairs_test'
+        elif mode == 'real':
+            table_name = 'pairs'
+
+        query = f"""
+            UPDATE {table_name}
             SET status = 'active',
                 open_price_1 = %s,
                 open_price_2 = %s
@@ -178,13 +193,18 @@ class DBManager:
         with self.conn.cursor() as cursor:
             cursor.execute(query, (open_price_1, open_price_2, token_1, token_2))
 
-    def switch_order(self, old_token, new_token, qty, price, usdt):
+    def switch_order(self, mode, old_token, new_token, qty, price, usdt):
         """
         Заменяет одну из сторон парной позиции новым токеном.
         Автоматически определяет, в каком слоте (1 или 2) находился старый токен.
         """
-        query = """
-            UPDATE pairs
+        if mode == 'demo':
+            table_name = 'pairs_test'
+        elif mode == 'real':
+            table_name = 'pairs'
+
+        query = f"""
+            UPDATE {table_name}
             SET
                 -- Обновляем первую пару, если old_token был там
                 token_1      = CASE WHEN token_1 = %(old)s THEN %(new)s ELSE token_1 END,
@@ -215,12 +235,19 @@ class DBManager:
                 'usdt': usdt
             })
 
-    def complete_half_order(self, orig_token_1, orig_token_2, token_to_close, close_price, close_fee):
+    def complete_half_order(self, mode, orig_token_1, orig_token_2, token_to_close, close_price, close_fee):
+        if mode == 'demo':
+            table_name = 'pairs_test'
+            hist_table_name = 'trading_history_test'
+        elif mode == 'real':
+            table_name = 'pairs'
+            hist_table_name = 'trading_history'
+
         with self.conn.cursor() as cursor:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT token_1, token_2, created_at, side_1, side_2, qty_1, qty_2,
-                    open_price_1, open_price_2, usdt_1, usdt_2, rpnl_1, rpnl_2, leverage, mode
-                FROM pairs
+                    open_price_1, open_price_2, usdt_1, usdt_2, rpnl_1, rpnl_2, leverage
+                FROM {table_name}
                 WHERE token_1 = %s AND token_2 = %s
             """, (orig_token_1, orig_token_2))
 
@@ -242,7 +269,6 @@ class DBManager:
         open_fee_1 = position[11]
         open_fee_2 = position[12]
         leverage = position[13]
-        mode = position[14]
 
         fee_1 = open_fee_1 + close_fee
         fee_2 = open_fee_2 + close_fee
@@ -272,8 +298,8 @@ class DBManager:
             close_price_1 = 0
             close_price_2 = close_price
 
-        query = """
-            INSERT INTO trading_history (token_1, token_2, open_time, close_time, side_1, side_2, qty_1, qty_2,
+        query = f"""
+            INSERT INTO {hist_table_name} (token_1, token_2, open_time, close_time, side_1, side_2, qty_1, qty_2,
                 open_price_1, open_price_2, close_price_1, close_price_2, fee_1, fee_2,
                 leverage, pnl_1, pnl_2, profit, mode)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -284,11 +310,15 @@ class DBManager:
                 open_price_1, open_price_2, close_price_1, close_price_2, fee_1, fee_2,
                 leverage, pnl_1, pnl_2, profit, mode))
 
-    def close_pair_order(self, token_1, token_2, side_1, reason):
+    def close_pair_order(self, mode, token_1, token_2, side_1, reason):
         """Обновляет статус ордера на по ключу (token_1, token_2, side_1)"""
+        if mode == 'demo':
+            table_name = 'pairs_test'
+        elif mode == 'real':
+            table_name = 'pairs'
 
-        query = """
-            UPDATE pairs
+        query = f"""
+            UPDATE {table_name}
             SET status = %s
             WHERE token_1 = %s AND token_2 = %s AND side_1 = %s
         """
@@ -296,13 +326,20 @@ class DBManager:
         with self.conn.cursor() as cursor:
             cursor.execute(query, (reason, token_1, token_2, side_1))
 
-    def complete_pair_order(self, token_1, token_2, close_price_1, close_price_2,
+    def complete_pair_order(self, mode, token_1, token_2, close_price_1, close_price_2,
                             close_fee_1, close_fee_2, reason):
+        if mode == 'demo':
+            table_name = 'pairs_test'
+            hist_table_name = 'trading_history_test'
+        elif mode == 'real':
+            table_name = 'pairs'
+            hist_table_name = 'trading_history'
+
         with self.conn.cursor() as cursor:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT token_1, token_2, created_at, side_1, side_2, qty_1, qty_2,
                     open_price_1, open_price_2, usdt_1, usdt_2, rpnl_1, rpnl_2, leverage, mode
-                FROM pairs
+                FROM {table_name}
                 WHERE token_1 = %s AND token_2 = %s
             """, (token_1, token_2))
 
@@ -341,8 +378,8 @@ class DBManager:
         Moscow_TZ = timezone(timedelta(hours=3))
         close_time = datetime.now(Moscow_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
-        query = """
-            INSERT INTO trading_history (token_1, token_2, open_time, close_time, side_1, side_2, qty_1, qty_2,
+        query = f"""
+            INSERT INTO {hist_table_name} (token_1, token_2, open_time, close_time, side_1, side_2, qty_1, qty_2,
                 open_price_1, open_price_2, close_price_1, close_price_2, fee_1, fee_2,
                 leverage, pnl_1, pnl_2, profit, mode, reason)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -355,9 +392,14 @@ class DBManager:
 
         self.delete_pair_order(token_1, token_2)
 
-    def delete_pair_order(self, token_1, token_2):
+    def delete_pair_order(self, mode, token_1, token_2):
         """Удаляет запись из таблицы pairs по ключу (token_1, token_2)"""
-        query = """DELETE FROM pairs
+        if mode == 'demo':
+            table_name = 'pairs_test'
+        elif mode == 'real':
+            table_name = 'pairs'
+
+        query = f"""DELETE FROM {table_name}
         WHERE token_1 = %s AND token_2 = %s"""
         with self.conn.cursor() as cur:
             cur.execute(query, (token_1, token_2))

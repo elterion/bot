@@ -54,7 +54,11 @@ def main():
             postgre_manager.set_system_state('trades_executor')
 
             # Загружаем данные
-            pairs = postgre_manager.get_table('pairs', df_type='polars')
+            if mode == 'real':
+                pairs = postgre_manager.get_table('pairs', df_type='polars')
+            elif mode == 'demo':
+                pairs = postgre_manager.get_table('pairs_test', df_type='polars')
+
             pending_orders = pairs.filter(pl.col('status').is_in(['opening', 'target',
                                                 'sl_profit', 'sl_zscore', 'manual']))
             active_orders = pairs.filter(pl.col('status') == 'active')
@@ -83,7 +87,7 @@ def main():
 
                     pairs_data.append([t1, t2, rpnl_1, rpnl_2, upnl_1, upnl_2])
 
-                postgre_manager.update_pairs(pairs_data)
+                postgre_manager.update_pairs(pairs_data, mode)
                 last_time = int(datetime.timestamp(datetime.now()))
 
             # ------------ Проверка на зависшие позиции -----------
@@ -130,12 +134,15 @@ def main():
 
                     # Тут надо реализовать подсчёт потерь
 
-                    postgre_manager.delete_pair_order(token_1, token_2)
+                    postgre_manager.delete_pair_order(mode, token_1, token_2)
                     print(f'Позиция {token_1[:-5]} - {token_2[:-5]} закрылась по СТОП-ЛОССУ!')
 
                     # Обновляем актуальные позиции
                     active_positions = trade_manager.get_all_positions(market_type='linear')
-                    pairs = postgre_manager.get_table('pairs', df_type='polars')
+                    if mode == 'real':
+                        pairs = postgre_manager.get_table('pairs', df_type='polars')
+                    elif mode == 'demo':
+                        pairs = postgre_manager.get_table('pairs_test', df_type='polars')
                     pending_orders = pairs.filter(pl.col('status').is_in(['opening', 'target',
                                                 'sl_profit', 'sl_zscore', 'manual']))
                     active_orders = pairs.filter(pl.col('status') == 'active')
@@ -152,7 +159,7 @@ def main():
                 open_ts = int(datetime.timestamp(row['created_at']))
 
                 if now - open_ts > 10 and status == 'opening':
-                    postgre_manager.delete_pair_order(token_1, token_2)
+                    postgre_manager.delete_pair_order(mode, token_1, token_2)
                     continue
 
                 side_1 = row['side_1']
@@ -180,7 +187,7 @@ def main():
                         if res['token'] == token_2:
                             open_price_2 = res['price']
 
-                    postgre_manager.commit_pair_order(token_1, token_2, open_price_1, open_price_2)
+                    postgre_manager.commit_pair_order(mode, token_1, token_2, open_price_1, open_price_2)
                     print(f'{ct}. Open position. {act_1} {token_1[:-5]}; {act_2} {token_2[:-5]}')
                     err_counter = 0
 
@@ -204,7 +211,7 @@ def main():
                             close_price_2 = res['price']
                             close_fee_2 = res['fee']
 
-                    postgre_manager.complete_pair_order(token_1, token_2, close_price_1, close_price_2,
+                    postgre_manager.complete_pair_order(mode, token_1, token_2, close_price_1, close_price_2,
                                         close_fee_1, close_fee_2, status)
                     print(f'{ct}. Close position. {act_1} {token_1[:-5]}; {act_2} {token_2[:-5]}')
                     err_counter = 0

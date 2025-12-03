@@ -149,7 +149,7 @@ def main(update_leverage):
 
     print(f'{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Начинаем работу...')
 
-    # --- Загружаем все коинтегрированные токены ---
+    # --- Загружаем все торгуемые токены ---
     token_pairs = []
     with open('./bot/config/token_pairs.txt', 'r') as file:
         for line in file:
@@ -181,7 +181,15 @@ def main(update_leverage):
     high_in = thresh_in
     high_out = thresh_out
 
-    curr_tracking_in = dict() # Словарь для отслеживания позиций на вход
+    try:
+        curr_tracking_in = {}
+        with open('./bot/config/tracking_pairs.txt', 'r') as f:
+            for line in f:
+                key1, key2, value = line.strip().split()
+                curr_tracking_in[(key1, key2)] = int(value)
+        print('Отслеживаемые пары:', tuple(curr_tracking_in.keys()))
+    except FileNotFoundError:
+        curr_tracking_in = dict() # Словарь для отслеживания позиций на вход
 
     time_now = datetime.now()
     last_zscore_update_time = int(datetime.timestamp(time_now))
@@ -341,16 +349,16 @@ def main(update_leverage):
                         # Если пара токенов входит в диапазон открытия позиции, и она ещё не отслеживается, добавляем в треккинг
                         if abs(lr_zscore) > abs(thresh_in) + dist_in and not (token_1, token_2) in curr_tracking_in:
                             curr_tracking_in[(token_1, token_2)] = 1
-                            print(f'{ct} Add to tracking: {token_1} - {token_2}; z_score: {lr_zscore:.2f}')
+                            print(f'{ct} Add to tracking: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}')
                         # Если открыто максимальное кол-во позиций, а текущая пара выходит из диапазона входа, убираем из отслеживаемых
                         elif (token_1, token_2) in curr_tracking_in and abs(lr_zscore) < thresh_in and len(pairs) >= max_pairs:
                             curr_tracking_in.pop((token_1, token_2))
-                            print(f'{ct} Delete from tracking: {token_1} - {token_2}; z_score: {lr_zscore:.2f}')
+                            print(f'{ct} Stop tracking: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}')
                         # Если z_score возвращается ниже отметки in_, но z_score, посчитанный вторым методом, слишком плохой,
                         #   удаляем токен из треккинга
                         elif (token_1, token_2) in curr_tracking_in and abs(lr_zscore) < thresh_in and abs(dist_zscore) < min_alt_zscore:
                             curr_tracking_in.pop((token_1, token_2))
-                            print(f'{ct} Delete from tracking: {token_1} - {token_2}; z_score: {lr_zscore:.2f}, z_score_2: {dist_zscore:.2f}')
+                            print(f'{ct} Stop tracking: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}, z_score_2: {dist_zscore:.2f}')
                         # Если z_score возвращается ниже отметки in_, входим в позицию
                         elif (token_1, token_2) in curr_tracking_in and abs(lr_zscore) < thresh_in:
                             if lr_zscore > low_in and dist_zscore < -min_alt_zscore:
@@ -446,6 +454,11 @@ def main(update_leverage):
 
         except KeyboardInterrupt:
             print('\nЗавершение работы.')
+
+            # Сохраняем отслеживаемые пары в файл
+            with open('./bot/config/tracking_pairs.txt', 'w') as f:
+                for (key1, key2), value in curr_tracking_in.items():
+                    f.write(f"{key1} {key2} {value}\n")
             break
 
 

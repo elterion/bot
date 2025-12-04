@@ -26,7 +26,7 @@ def main():
         raise NotImplementedError('Неизвестный режим работы бота!')
 
     db_params = {'host': host, 'user': user, 'password': password, 'dbname': db_name}
-    postgre_manager = DBManager(db_params)
+    db_manager = DBManager(db_params)
     trade_manager = Trade(demo=demo)
 
     with open("./data/coin_information.pkl", "rb") as f:
@@ -51,13 +51,13 @@ def main():
             print(f'Текущее время: {ct}', end='\r')
 
             # Устанавливаем heartbeat отметку
-            postgre_manager.set_system_state('trades_executor')
+            db_manager.set_system_state('trades_executor')
 
             # Загружаем данные
             if mode == 'real':
-                pairs = postgre_manager.get_table('pairs', df_type='polars')
+                pairs = db_manager.get_table('pairs', df_type='polars')
             elif mode == 'demo':
-                pairs = postgre_manager.get_table('pairs_test', df_type='polars')
+                pairs = db_manager.get_table('pairs_test', df_type='polars')
 
             pending_orders = pairs.filter(pl.col('status').is_in(['opening', 'target',
                                                 'sl_profit', 'sl_zscore', 'manual']))
@@ -87,7 +87,7 @@ def main():
 
                     pairs_data.append([t1, t2, rpnl_1, rpnl_2, upnl_1, upnl_2])
 
-                postgre_manager.update_pairs(pairs_data, mode)
+                db_manager.update_pairs(pairs_data, mode)
                 last_time = int(datetime.timestamp(datetime.now()))
 
             # ------------ Проверка на зависшие позиции -----------
@@ -134,15 +134,15 @@ def main():
 
                     # Тут надо реализовать подсчёт потерь
 
-                    postgre_manager.delete_pair_order(mode, token_1, token_2)
+                    db_manager.delete_pair_order(mode, token_1, token_2)
                     print(f'Позиция {token_1[:-5]} - {token_2[:-5]} закрылась по СТОП-ЛОССУ!')
 
                     # Обновляем актуальные позиции
                     active_positions = trade_manager.get_all_positions(market_type='linear')
                     if mode == 'real':
-                        pairs = postgre_manager.get_table('pairs', df_type='polars')
+                        pairs = db_manager.get_table('pairs', df_type='polars')
                     elif mode == 'demo':
-                        pairs = postgre_manager.get_table('pairs_test', df_type='polars')
+                        pairs = db_manager.get_table('pairs_test', df_type='polars')
                     pending_orders = pairs.filter(pl.col('status').is_in(['opening', 'target',
                                                 'sl_profit', 'sl_zscore', 'manual']))
                     active_orders = pairs.filter(pl.col('status') == 'active')
@@ -159,7 +159,7 @@ def main():
                 open_ts = int(datetime.timestamp(row['created_at']))
 
                 if now - open_ts > 10 and status == 'opening':
-                    postgre_manager.delete_pair_order(mode, token_1, token_2)
+                    db_manager.delete_pair_order(mode, token_1, token_2)
                     continue
 
                 side_1 = row['side_1']
@@ -187,7 +187,7 @@ def main():
                         if res['token'] == token_2:
                             open_price_2 = res['price']
 
-                    postgre_manager.commit_pair_order(mode, token_1, token_2, open_price_1, open_price_2)
+                    db_manager.commit_pair_order(mode, token_1, token_2, open_price_1, open_price_2)
                     print(f'{ct}. Open position. {act_1} {token_1[:-5]}; {act_2} {token_2[:-5]}')
                     err_counter = 0
 
@@ -202,6 +202,9 @@ def main():
 
                     rsp = trade_manager.place_pair_order('linear', token_1, act_1, qty_1, sl_1, token_2, act_2, qty_2, sl_2)
 
+                    # Меняем статус на closing, чтобы если что-то пойдёт не так, не отправлять новые ордеры на биржу
+                    db_manager.set_status_to_order(mode, token_1, token_2, 'closing')
+
                     for r in rsp:
                         res = trade_manager.get_order('linear', order_id=r)
                         if res['token'] == token_1:
@@ -211,7 +214,7 @@ def main():
                             close_price_2 = res['price']
                             close_fee_2 = res['fee']
 
-                    postgre_manager.complete_pair_order(mode, token_1, token_2, close_price_1, close_price_2,
+                    db_manager.complete_pair_order(mode, token_1, token_2, close_price_1, close_price_2,
                                         close_fee_1, close_fee_2, status)
                     print(f'{ct}. Close position. {act_1} {token_1[:-5]}; {act_2} {token_2[:-5]}')
                     err_counter = 0
@@ -225,17 +228,17 @@ def main():
         except (Timeout, ConnectionError) as err:
             print(f'{ct} Timeout error.')
             sleep(5)
-        except KeyError as err:
-            print('Не удалось обновить позицию:', err)
-            err_counter += 1
-            sleep(5)
+        # except KeyError as err:
+        #     print('Не удалось обновить позицию:', err)
+        #     err_counter += 1
+        #     sleep(5)
         except KeyboardInterrupt:
             print('\nЗавершение работы.')
             break
-        except Exception as err:
-            print(f'{ct} {type(err).__name__}: {err}')
-            err_counter += 1
-            sleep(5)
+        # except Exception as err:
+        #     print(f'{ct} {type(err).__name__}: {err}')
+        #     err_counter += 1
+        #     sleep(5)
 
 
 if __name__ == '__main__':

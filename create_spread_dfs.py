@@ -39,7 +39,7 @@ def create_dfs(token_pairs, spread_method, tf, winds, start_time, valid_time, en
 
         start_ts = int(datetime.timestamp(valid_time))
         spread_df = create_zscore_df(token_1, token_2, tick_df, agg_df, tf, winds,
-                                     min_order, start_ts, median_length=6, spr_method=spread_method)
+                                     start_ts, median_length=6, spr_method=spread_method)
 
         spread_df.write_parquet(f'./data/pair_backtest/{token_1}_{token_2}_{tf}_{spread_method}.parquet')
 

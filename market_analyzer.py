@@ -107,6 +107,11 @@ def set_leverage_cached(demo, token, leverage):
     except Timeout:
         print(f'Проблема с изменением leverage для токена {token}.')
 
+def save_tracking_pairs_to_file(curr_tracking_in):
+    with open('./bot/config/tracking_pairs.txt', 'w') as f:
+        for (key1, key2), value in curr_tracking_in.items():
+            f.write(f"{key1} {key2} {value}\n")
+    print('Сохраняем текущие отслеживаемые пары в файл.')
 
 def main(update_leverage):
     config = load_config('./bot/config/config.yaml')
@@ -219,6 +224,8 @@ def main(update_leverage):
 
             if ts - db_manager.get_system_state('trades_executor') > 20:
                 print(f'{ct} Потеряна связь с trades_executor!')
+                # Сохраняем отслеживаемые пары в файл
+                save_tracking_pairs_to_file(curr_tracking_in)
                 break
 
             # --- Подгружаем исторические датафреймы 1 раз в час ---
@@ -462,12 +469,13 @@ def main(update_leverage):
             print('\nЗавершение работы.')
 
             # Сохраняем отслеживаемые пары в файл
-            with open('./bot/config/tracking_pairs.txt', 'w') as f:
-                for (key1, key2), value in curr_tracking_in.items():
-                    f.write(f"{key1} {key2} {value}\n")
-            print('Сохраняем текущие отслеживаемые пары в файл.')
+            save_tracking_pairs_to_file(curr_tracking_in)
             break
+        except Exception as err:
+            print(f'Ошибка!', err)
+            save_tracking_pairs_to_file(curr_tracking_in)
+            return
 
 
 if __name__ == '__main__':
-    main(update_leverage=True)
+    main(update_leverage=0)

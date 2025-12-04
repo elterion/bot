@@ -364,13 +364,13 @@ def main(update_leverage):
                             print(f'{ct} Stop tracking: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}')
                         # Если z_score возвращается ниже отметки in_, входим в позицию
                         elif (token_1, token_2) in curr_tracking_in and abs(lr_zscore) < thresh_in and abs(lr_zscore) > thresh_in - width_zone_in:
-                            if lr_zscore > low_in:
+                            if lr_zscore < 0:
                                 print(f'{ct} Создаём ордер: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}, z_score_2: {dist_zscore:.2f}')
                                 pos_opened = open_position(token_1, token_2, mode, t1_data, t2_data,
                                     'long', 'short', leverage, min_order, max_order, fee_rate,
                                     lr_spr_mean, lr_spr_std, coin_information, db_manager)
                                 update_positions_flag = True
-                            elif lr_zscore < high_in:
+                            elif lr_zscore > 0:
                                 print(f'{ct} Создаём ордер: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}, z_score_2: {dist_zscore:.2f}')
                                 pos_opened = open_position(token_1, token_2, mode, t1_data, t2_data,
                                     'short', 'long', leverage, min_order, max_order, fee_rate,

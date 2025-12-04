@@ -193,6 +193,22 @@ class DBManager:
         with self.conn.cursor() as cursor:
             cursor.execute(query, (open_price_1, open_price_2, token_1, token_2))
 
+    def set_status_to_order(self, mode, token_1, token_2, status):
+        """Обновляет статус ордера на status по ключу (token_1, token_2)"""
+        if mode == 'demo':
+            table_name = 'pairs_test'
+        elif mode == 'real':
+            table_name = 'pairs'
+
+        query = f"""
+            UPDATE {table_name}
+            SET status = %s
+            WHERE token_1 = %s AND token_2 = %s
+        """
+
+        with self.conn.cursor() as cursor:
+            cursor.execute(query, (status, token_1, token_2))
+
     def switch_order(self, mode, old_token, new_token, qty, price, usdt):
         """
         Заменяет одну из сторон парной позиции новым токеном.
@@ -390,7 +406,7 @@ class DBManager:
                 open_price_1, open_price_2, close_price_1, close_price_2, fee_1, fee_2,
                 leverage, pnl_1, pnl_2, profit, mode, reason))
 
-        self.delete_pair_order(token_1, token_2)
+        self.delete_pair_order(mode, token_1, token_2)
 
     def delete_pair_order(self, mode, token_1, token_2):
         """Удаляет запись из таблицы pairs по ключу (token_1, token_2)"""

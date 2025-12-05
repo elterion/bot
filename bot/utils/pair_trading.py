@@ -536,8 +536,8 @@ def calculate_z_score(start_ts: int,
 
         # Выберем из агрегированных цен только те, которые были до текущего момента
         mask = hist_ts < tss[i]
-        t1_hist = hist_t1[mask]
-        t2_hist = hist_t2[mask]
+        t1_hist = hist_t1[mask][:-1]
+        t2_hist = hist_t2[mask][:-1]
 
         # Сформируем массивы, в которых к историческим данным в конец добавим текущую медианную цену, и посчитаем z_score
         t1_arr = np.append(t1_hist, t1_med)
@@ -778,7 +778,6 @@ def load_data(token_1, token_2, valid_time, end_time, tf, wind, db_manager):
             token_1, token_2 - Названия токенов
             valid_time - время в формате datetime.datetime, с которого начинается непосредственно бектест
             end_time   - время окончания бектеста в формате datetime.datetime
-            params - dict() с параметрами
         """
         train_length = int(tf[0]) * wind * 2 + 1
         start_time = valid_time - timedelta(hours=train_length)
@@ -1076,6 +1075,11 @@ def get_open_time_stats(tick_df, agg_df, token_1, token_2, side_1, side_2, open_
     rsi_t1_1h = rsi(agg_hist, window=14, col_name=token_1)['rsi'][-1]
     rsi_t2_1h = rsi(agg_hist, window=14, col_name=token_2)['rsi'][-1]
 
+    rsi_long_5m  = rsi_t1_5m if side_1 == 'long' else rsi_t2_5m
+    rsi_short_5m = rsi_t2_5m if side_1 == 'long' else rsi_t1_5m
+    rsi_long_1h  = rsi_t1_1h if side_1 == 'long' else rsi_t2_1h
+    rsi_short_1h = rsi_t2_1h if side_1 == 'long' else rsi_t1_1h
+
     # ----- Расчёт линии тренда, построенной поверх логарифмического спреда -----
     tick_spread_wind = tick_hist['log_spread'].tail(wind * 12 * 60).to_numpy() # Фильтруем только данные за {wind} часов
     tick_spread_12 = tick_hist['log_spread'].tail(12 * 12 * 60).to_numpy()     # Фильтруем только данные за 12 часов
@@ -1192,7 +1196,7 @@ def get_open_time_stats(tick_df, agg_df, token_1, token_2, side_1, side_2, open_
         'short_std_wind': short_std_wind,
         'mean_12h': mean_12,               # Среднее значение спреда за последние 12 часов
         'long_std_12': long_std_12,
-        'std_2_12h': short_std_12,
+        'short_std_12': short_std_12,
         'mean_diff': mean_diff,            # Изменение среднего значения между 12 часами и wind часами в %
         'tls_beta_wind': tls_beta_wind,
         'tls_beta_12h': tls_beta_12,
@@ -1200,11 +1204,12 @@ def get_open_time_stats(tick_df, agg_df, token_1, token_2, side_1, side_2, open_
         'hurst_12h': H_12,                 # Показатель Хёрста за 12 часов
         'spread_rsi_5m': spread_rsi_5m,    # Индикатор RSI на агрегированном по 5 мин спреде
         'spread_rsi_1h': spread_rsi_1h,
-        'rsi_t1_5m': rsi_t1_5m,            # Индикатор RSI на агрегированном по 5 мин цене токена_1
-        'rsi_t2_5m': rsi_t2_5m,
-        'rsi_t1_1h': rsi_t1_1h,            # Индикатор RSI на агрегированном по 1 часу цене токена_1
-        'rsi_t2_1h': rsi_t2_1h,
-        'profit_z_corr': pr_z_corr,        # Корреляция между профитом и z_score
+        'rsi_long_5m': rsi_long_5m,        # Индикатор RSI на агрегированном по 5 мин цене long-токена
+        'rsi_short_5m': rsi_short_5m,
+        'rsi_long_1h': rsi_long_1h,        # Индикатор RSI на агрегированном по 1 часу цене long-токена
+        'rsi_short_1h': rsi_short_1h,
+
+        'profit_z_corr': pr_z_corr,        # Корреляция между профитом и z_score за последние 2 часа перед входом в позу
         'profit_fz_corr': pr_fz_corr,      # Корреляция между профитом и fixed_z_score
         'z_fz_corr': z_fz_corr,            # Корреляция между z_score и fixed_z_score
 
@@ -1215,11 +1220,11 @@ def get_open_time_stats(tick_df, agg_df, token_1, token_2, side_1, side_2, open_
         'trend_wind': trend_wind,         # Отношение конца регрессионной прямой к началу за wind часов
         'trend_12h': trend_12,
         'half_life_log_spread': half_life_log_spread,
-        'long_btc_corr': long_btc_corr,      # Корреляция с BTC long-ноги
+        'long_btc_corr': long_btc_corr,      # Корреляция long-токена с BTC long-ноги
         'short_btc_corr': short_btc_corr,
-        'long_eth_corr': long_eth_corr,      # Корреляция с ETH
+        'long_eth_corr': long_eth_corr,      # Корреляция long-токена с ETH
         'short_eth_corr': short_eth_corr,
-        'long_sol_corr': long_sol_corr,      # Корреляция с SOL
+        'long_sol_corr': long_sol_corr,      # Корреляция long-токена с SOL
         'short_sol_corr': short_sol_corr,
 
         'ask_usdt_mean_wind': ask_usdt_mean_wind, # Торговый объём в usdt (ask) за последние {wind} часов

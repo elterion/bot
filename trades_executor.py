@@ -67,7 +67,12 @@ def main():
             now = int(datetime.timestamp(datetime.now()))
             # ------------ Обновление открытых позиций ------------
             if now - last_time > 10:
-                active_positions = trade_manager.get_all_positions(market_type='linear')
+                try:
+                    active_positions = trade_manager.get_all_positions(market_type='linear')
+                except KeyError:
+                    print('Проблема с обновлением позиций на бирже.')
+                    err_counter += 1
+                    sleep(5)
 
                 pairs_data = []
 
@@ -138,7 +143,13 @@ def main():
                     print(f'Позиция {token_1[:-5]} - {token_2[:-5]} закрылась по СТОП-ЛОССУ!')
 
                     # Обновляем актуальные позиции
-                    active_positions = trade_manager.get_all_positions(market_type='linear')
+                    try:
+                        active_positions = trade_manager.get_all_positions(market_type='linear')
+                    except KeyError:
+                        print('Проблема с обновлением позиций на бирже.')
+                        err_counter += 1
+                        sleep(5)
+
                     if mode == 'real':
                         pairs = db_manager.get_table('pairs', df_type='polars')
                     elif mode == 'demo':
@@ -193,7 +204,12 @@ def main():
 
                     # Обновляем открытые позиции
                     sleep(0.5)
-                    active_positions = trade_manager.get_all_positions(market_type='linear')
+                    try:
+                        active_positions = trade_manager.get_all_positions(market_type='linear')
+                    except KeyError:
+                        print('Проблема с обновлением позиций на бирже.')
+                        err_counter += 1
+                        sleep(5)
 
                 elif status in ('target', 'sl_profit', 'sl_zscore', 'manual'):
                     sl_1, sl_2 = None, None
@@ -221,7 +237,12 @@ def main():
 
                     # Обновляем открытые позиции
                     sleep(0.5)
-                    active_positions = trade_manager.get_all_positions(market_type='linear')
+                    try:
+                        active_positions = trade_manager.get_all_positions(market_type='linear')
+                    except KeyError:
+                        print('Проблема с обновлением позиций на бирже.')
+                        err_counter += 1
+                        sleep(5)
 
             sleep(0.5)
 

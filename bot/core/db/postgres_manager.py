@@ -459,7 +459,7 @@ class DBManager:
 
         schema = {
             'ts': pl.Int64,
-            'time': pl.Datetime,  # или pl.String, в зависимости от формата
+            'time': pl.Datetime(time_unit='us', time_zone='Europe/Moscow'),
             'exchange': pl.String,
             'token_1': pl.String,
             'token_2': pl.String,

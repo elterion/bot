@@ -60,6 +60,8 @@ def analyze_strategy(df: pl.DataFrame, start_date, end_date,
         (pl.col('close_time') - pl.col('open_time')).alias('duration')
     )
 
+    hour_duration = df['duration'].sum().days * 24 + df['duration'].sum().seconds / 3600
+
     # --- Базовая информация ---
     total_seconds = (end_date - start_date).total_seconds()
 
@@ -87,6 +89,7 @@ def analyze_strategy(df: pl.DataFrame, start_date, end_date,
     metrics['initial_balance'] = initial_balance
     metrics['final_balance'] = round(df['balance'][-1], 4)
     metrics['profit'] = round(df['total_profit'].sum(), 2)
+    metrics['$_hour'] = round(df['total_profit'].sum() / hour_duration, 2)
 
     # --- Доходность ---
     metrics["total_perc_return"] = round((metrics['final_balance']

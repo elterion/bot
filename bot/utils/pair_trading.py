@@ -135,167 +135,6 @@ def make_zscore_df(df, token_1, token_2, wind, method='dist'):
         ).collect()
 
 @njit(cache=True)
-def get_tls_zscore(t1, t2, winds, min_corr=0.6):
-    """
-    TLS (Orthogonal Regression) with Sign Stabilization.
-    """
-    t1 = np.log(t1)
-    t2 = np.log(t2)
-
-    n = t1.shape[0]
-    m = winds.shape[0]
-
-    alpha_full = np.full((m, n), np.nan, dtype=np.float64)
-    beta_full  = np.full((m, n), np.nan, dtype=np.float64)
-    z_full     = np.full((m, n), np.nan, dtype=np.float64)
-    spread_full = np.full((m, n), np.nan, dtype=np.float64)
-    mean_s_full = np.full((m, n), np.nan, dtype=np.float64)
-    std_s_full  = np.full((m, n), np.nan, dtype=np.float64)
-
-    sum_x  = np.zeros(m, dtype=np.float64)
-    sum_y  = np.zeros(m, dtype=np.float64)
-    sum_xx = np.zeros(m, dtype=np.float64)
-    sum_yy = np.zeros(m, dtype=np.float64)
-    sum_xy = np.zeros(m, dtype=np.float64)
-
-    # Вектор-якорь. Мы ожидаем, что спред ~ PriceA - PriceB.
-    # Вектор нормали к линии регрессии должен быть сонаправлен с (-1, 1).
-    # Это предотвращает инверсию знака спреда.
-    ref_vx = -1.0
-    ref_vy = 1.0
-
-    for i in range(n):
-        x = t2[i]
-        y = t1[i]
-
-        for j in range(m):
-            w = winds[j]
-            if w <= 0: continue
-
-            sum_x[j]  += x
-            sum_y[j]  += y
-            sum_xx[j] += x * x
-            sum_yy[j] += y * y
-            sum_xy[j] += x * y
-
-            if i >= w:
-                x_old = t2[i - w]
-                y_old = t1[i - w]
-                sum_x[j]  -= x_old
-                sum_y[j]  -= y_old
-                sum_xx[j] -= x_old * x_old
-                sum_yy[j] -= y_old * y_old
-                sum_xy[j] -= x_old * y_old
-
-            if i >= w - 1:
-                mean_x = sum_x[j] / w
-                mean_y = sum_y[j] / w
-                var_x = (sum_xx[j] / w) - mean_x * mean_x
-                var_y = (sum_yy[j] / w) - mean_y * mean_y
-                cov_xy = (sum_xy[j] / w) - mean_x * mean_y
-
-                std_x = np.sqrt(var_x)
-                std_y = np.sqrt(var_y)
-
-                # Защита от деления на ноль
-                if std_x < 1e-9 or std_y < 1e-9:
-                    curr_corr = 0.0
-                else:
-                    curr_corr = cov_xy / (std_x * std_y)
-
-                # === ЛОГИЧЕСКАЯ РАЗВИЛКА ===
-                use_tls = True
-
-                # Если корреляция слабая, TLS найдет "фантомную" ось.
-                # Лучше использовать OLS или просто Beta=1.
-                if abs(curr_corr) < min_corr:
-                    use_tls = False
-
-                beta = 0.0
-                alpha = 0.0
-                s = 0.0
-                std_s = 0.0
-
-                if use_tls:
-                    # 1. Считаем угол наклона главной оси (Major Axis)
-                    # arctan2 корректно обрабатывает все квадранты и вертикальные случаи
-                    # Формула: tan(2*theta) = 2*cov / (var_x - var_y)
-                    angle_major = 0.5 * np.arctan2(2 * cov_xy, var_x - var_y)
-
-                    # 2. Угол нормали (Minor Axis) - направление измерения спреда
-                    angle_minor = angle_major + np.pi / 2.0
-
-                    # 3. Компоненты нормального вектора (v_x, v_y)
-                    v_x = np.cos(angle_minor)
-                    v_y = np.sin(angle_minor)
-
-                    # 4. Проверка знака (Stabilization)
-                    # Если вектор смотрит в противоположную сторону от нашего "ожидания"
-                    # (скалярное произведение < 0), мы его разворачиваем.
-                    dot_prod = v_x * ref_vx + v_y * ref_vy
-                    if dot_prod < 0:
-                        v_x = -v_x
-                        v_y = -v_y
-
-                    # 5. Расчет спреда как проекции точки на вектор нормали
-                    # s = v_x * (x - mean_x) + v_y * (y - mean_y)
-                    s = v_x * (x - mean_x) + v_y * (y - mean_y)
-
-                    # 6. Расчет дисперсии остатков (Lambda Min)
-                    delta = var_y - var_x
-                    D_term = np.sqrt(delta**2 + 4 * cov_xy**2)
-                    lambda_min = (var_x + var_y - D_term) / 2.0
-                    if lambda_min < 0:
-                        lambda_min = 0.0
-                    std_s = np.sqrt(lambda_min)
-
-                    # Расчет beta для истории (опционально, slope = tan(angle_major))
-                    # Осторожно: tan может быть бесконечным, но для записи ок.
-                    beta = np.tan(angle_major)
-                    alpha = mean_y - beta * mean_x
-
-                else:
-                    # --- Fallback: OLS или Fixed Beta ---
-                    # В режиме низкой корреляции безопаснее считать, что
-                    # Beta = sign(correlation) * (std_y / std_x) (это OLS)
-                    # Или даже жестко Beta = 1.0, если активы одной природы.
-
-                    # Реализуем OLS (он более консервативен и не дает "обратных" сигналов)
-                    if abs(var_x) > 1e-9:
-                        beta = cov_xy / var_x
-                    else:
-                        beta = 0.0
-
-                    alpha = mean_y - beta * mean_x
-
-                    # Спред OLS: y - (alpha + beta*x)
-                    # Но чтобы Z-score был сопоставим с TLS, нормируем на sqrt(1+b^2)
-                    norm = np.sqrt(1 + beta**2)
-                    s = (y - (alpha + beta * x)) / norm
-
-                    # Стандартное отклонение остатков
-                    # Приближенно можно взять std спреда за окно
-                    # Но проще: std_s = sqrt(var_y - beta*cov_xy) / norm (теоретическое)
-                    resid_var = var_y - beta * cov_xy
-                    if resid_var < 0: resid_var = 0
-                    std_s = np.sqrt(resid_var) / norm
-
-                mean_s = 0.0
-                if std_s > 1e-12:
-                    z = s / std_s
-                else:
-                    z = 0.0
-
-                beta_full[j, i]   = beta
-                alpha_full[j, i]  = alpha
-                spread_full[j, i] = s
-                mean_s_full[j, i] = mean_s
-                std_s_full[j, i]  = std_s
-                z_full[j, i]      = z
-
-    return spread_full[:, -1], mean_s_full[:, -1], std_s_full[:, -1], alpha_full[:, -1], beta_full[:, -1], z_full[:, -1]
-
-@njit(cache=True)
 def get_lr_zscore(t1, t2, winds):
     t1 = np.log(t1)
     t2 = np.log(t2)
@@ -547,8 +386,6 @@ def calculate_z_score(start_ts: int,
             spread, mean_spread, spread_std, alpha, beta, zscore = get_lr_zscore(t1_arr, t2_arr, winds)
         elif spr_method == 1:
             spread, mean_spread, spread_std, zscore = get_dist_zscore(t1_arr, t2_arr, winds)
-        elif spr_method == 2:
-            spread, mean_spread, spread_std, alpha, beta, zscore = get_tls_zscore(t1_arr, t2_arr, winds)
 
         ts_arr[i] = tss[i]
         spread_arr[i] = spread
@@ -608,10 +445,11 @@ def get_qty(
         fee_rate: float = 0.001,
         std_1: float | None = None,
         std_2: float | None = None,
-        method: 'str' = 'beta',
+        method: 'str' = 'beta_neutral',
     ):
     """
         Вычисляет размеры позиций для двух активов.
+        Если method == 'beta_neutral', тогда beta должна быть рассчитана на логарифмах цен.
         Args:
             price_1: цена актива 1 (в долларах)
             price_2: цена актива 2 (в долларах)
@@ -620,7 +458,7 @@ def get_qty(
             total_usdt_amount: общий размер позиции в долларах
             fee_rate: комиссия за сделки
             std_1, std_2 - волатильность активов 1 и 2 для расчёта vol-neutral позиции
-            method: метод распределения денег между плечами сделки. 'beta' или 'usdt_neutral'
+            method: метод распределения денег между плечами сделки. 'beta_neutral' или 'usdt_neutral'
         Returns:
             qty_1, qty_2: количество токенов 1 и 2
     """
@@ -634,10 +472,12 @@ def get_qty(
     dp_2 = get_step_info(coin_information, token_2, 'bybit_linear', 'bybit_linear')
 
     if method == 'beta_neutral':
-        qty_1 = total_usdt_amount * (1 - fee_rate) / (price_1 + beta * price_2)
-        qty_1 = round_down(qty_1, dp_1)
-        qty_2 = beta * qty_1
-        qty_2 = round_down(qty_2, dp_2)
+        abs_beta = abs(beta)
+
+        val_1 = total_usdt_amount * (1 - fee_rate) / (1 + abs_beta)
+        val_2 = val_1 * abs_beta
+        qty_1 = round_down(val_1 / price_1, dp_1)
+        qty_2 = round_down(val_2 / price_2, dp_2)
     elif method == 'usdt_neutral':
         qty_1 = round_down(0.5 * total_usdt_amount / (1.0 + 2.0 * fee_rate) / price_1, dp_1)
         qty_2 = round_down(0.5 * total_usdt_amount / (1.0 + 2.0 * fee_rate) / price_2, dp_2)
@@ -952,6 +792,10 @@ def get_relative_sensitivity(df, side_1):
 
     return sens_favor, sens_adv
 
+def min_max_normalize(prices):
+    """Нормировка цен в диапазон [0, 1]"""
+    return (prices - np.min(prices)) / (np.max(prices) - np.min(prices))
+
 def get_open_time_stats(tick_df, agg_df, token_1, token_2, side_1, side_2, open_time, tf, wind, thresh_out, coin_information):
     # Проследить, чтобы tick_df начинался не за wind часов от момента входа, а раньше ещё на несколько часов, чтобы
     # можно было посчитать статы
@@ -963,67 +807,53 @@ def get_open_time_stats(tick_df, agg_df, token_1, token_2, side_1, side_2, open_
             (pl.col(token_1).log() - pl.col(token_2).log()).alias('log_spread')
         )
 
-    # ----- Собираем долговременную статистику -----
-    stats = pl.read_parquet('./data/pair_selection/all_pairs.parquet').filter(
-            (pl.col('coin1') == token_1) & (pl.col('coin2') == token_2)
-        )
-
-    long_std_180d = stats['std_1'][0] if side_1 == 'long' else stats['std_2'][0]
-    short_std_180d = stats['std_2'][0] if side_1 == 'long' else stats['std_1'][0]
-    long_beta_180d = stats['beta_1'][0] if side_1 == 'long' else stats['beta_2'][0]
-    short_beta_180d = stats['beta_2'][0] if side_1 == 'long' else stats['beta_1'][0]
-    long_pv = stats['pv_1'][0] if side_1 == 'long' else stats['pv_2'][0]
-    short_pv = stats['pv_2'][0] if side_1 == 'long' else stats['pv_1'][0]
-    long_btc_corr = stats['coin1_BTC'][0] if side_1 == 'long' else stats['coin2_BTC'][0]
-    short_btc_corr = stats['coin2_BTC'][0] if side_1 == 'long' else stats['coin1_BTC'][0]
-    long_eth_corr = stats['coin1_ETH'][0] if side_1 == 'long' else stats['coin2_ETH'][0]
-    short_eth_corr = stats['coin2_ETH'][0] if side_1 == 'long' else stats['coin1_ETH'][0]
-    long_sol_corr = stats['coin1_SOL'][0] if side_1 == 'long' else stats['coin2_SOL'][0]
-    short_sol_corr = stats['coin2_SOL'][0] if side_1 == 'long' else stats['coin1_SOL'][0]
-
-    tls_beta = stats['tls_beta'][0]
-    coint = stats['coint'][0]
-    hedge_r = stats['hedge_r'][0]
-
-    # ----- Собираем статистику за {wind} часов -----
+    # ----- Собираем статистику за 2*{wind} часов -----
     agg_df_wind = agg_hist.with_columns([
         pl.col(token_1).pct_change().std().alias("vol_1"),
         pl.col(token_2).pct_change().std().alias("vol_2"),
         pl.col('log_spread').mean().alias('mean')
     ])
 
-    mean_wind = agg_df_wind["mean"][0]
+    spr_mean_wind = agg_df_wind["mean"][0]
 
     long_std_wind = agg_df_wind["vol_1"][0] if side_1 == 'long' else agg_df_wind["vol_2"][0]
     short_std_wind = agg_df_wind["vol_2"][0] if side_1 == 'long' else agg_df_wind["vol_1"][0]
     tls_beta_wind = calculate_tls_beta(agg_df_wind[token_1].to_numpy(), agg_df_wind[token_2].to_numpy())
 
-    # Hurst Exponent за {wind} часов. Аггрегируем данные по 20 минут, чтобы избавиться от шума
+    # Hurst Exponent за 2*{wind} часов. Аггрегируем данные по 20 минут, чтобы избавиться от шума
     spread_20m = make_trunc_df(tick_hist, '20m', token_1, token_2, method="triple").with_columns(
             (pl.col(token_1).log() - pl.col(token_2).log()).alias('log_spread')
-        ).filter(pl.col('time') < open_time).tail(3*wind)
+        ).filter(pl.col('time') < open_time).tail(6*wind)
     H_wind, _, _ = compute_Hc(spread_20m['log_spread'])
 
-    # ----- Собираем статистику за 12 часов -----
-    agg_df_12 = agg_hist.tail(12).with_columns([
-        pl.col(token_1).pct_change().std().alias("vol_1"),
-        pl.col(token_2).pct_change().std().alias("vol_2"),
-        pl.col('log_spread').mean().alias('mean')
+    # ----- Собираем статистику за 2 часа -----
+    agg_df_2 = tick_hist.filter(
+            pl.col('time') > open_time - timedelta(hours=2)
+        ).with_columns([
+            pl.col(token_1).pct_change().std().alias("vol_1"),
+            pl.col(token_2).pct_change().std().alias("vol_2"),
+            pl.col('log_spread').mean().alias('mean')
     ])
 
-    mean_12 = agg_df_12["mean"][0]
+    mean_2h = agg_df_2["mean"][0]
 
-    long_std_12 = agg_df_12["vol_1"][0] if side_1 == 'long' else agg_df_12["vol_2"][0]
-    short_std_12 = agg_df_12["vol_2"][0] if side_1 == 'long' else agg_df_12["vol_1"][0]
-    tls_beta_12 = calculate_tls_beta(agg_df_12[token_1].to_numpy(), agg_df_12[token_2].to_numpy())
+    long_std_2 = agg_df_2["vol_1"][0] if side_1 == 'long' else agg_df_2["vol_2"][0]
+    short_std_2 = agg_df_2["vol_2"][0] if side_1 == 'long' else agg_df_2["vol_1"][0]
+    tls_beta_2 = calculate_tls_beta(agg_df_2[token_1].to_numpy(), agg_df_2[token_2].to_numpy())
 
-    # Hurst Exponent за 12 часов на 5-минутных данных
-    spread_5m = make_trunc_df(tick_hist, '5m', token_1, token_2, method="triple").with_columns(
-            (pl.col(token_1).log() - pl.col(token_2).log()).alias('log_spread')
-        ).filter(pl.col('time') < open_time).tail(12 * 12)
-    H_12, _, _ = compute_Hc(spread_5m['log_spread'])
+    mean_diff = (mean_2h / spr_mean_wind - 1) * 100 # Изменение среднего значения лог-спреда
 
-    mean_diff = (mean_12 / mean_wind - 1) * 100 # Изменение среднего значения лог-спреда
+    # ----- Собираем статистику за 5 минут -----
+    agg_df_5m = tick_hist.filter(
+            pl.col('time') > open_time - timedelta(minutes=5)
+        ).with_columns([
+            pl.col(token_1).pct_change().std().alias("vol_1"),
+            pl.col(token_2).pct_change().std().alias("vol_2"),
+            pl.col('log_spread').mean().alias('mean')
+    ])
+
+    long_std_5m = agg_df_5m["vol_1"][0] if side_1 == 'long' else agg_df_5m["vol_2"][0]
+    short_std_5m = agg_df_5m["vol_2"][0] if side_1 == 'long' else agg_df_5m["vol_1"][0]
 
     # ----- Корреляция между движением z_score и профита за последние 2 часа -----
     start_track_time = open_time - timedelta(hours=2)
@@ -1037,6 +867,11 @@ def get_open_time_stats(tick_df, agg_df, token_1, token_2, side_1, side_2, open_
                     median_length=6, spr_method='lr'
         ).rename({f'spread_{wind}_{tf}': 'spread', f'spread_mean_{wind}_{tf}':
                   'spread_mean', f'spread_std_{wind}_{tf}': 'spread_std', f'z_score_{wind}_{tf}': 'z_score'})
+
+    # Волатильность спреда за последние 2 часа и 5 минут
+    spr_std_2h = lr_df_2h['spread'].std()
+    spr_std_5m = lr_df_2h['spread'].tail(12*5).std()
+
 
     # Посчитаем z_score с зафиксированным при входе mean и std
     fixed_mean = lr_df_2h['spread_mean'][0]
@@ -1062,40 +897,62 @@ def get_open_time_stats(tick_df, agg_df, token_1, token_2, side_1, side_2, open_
         pr_z_corr = -pr_z_corr
         pr_fz_corr = -pr_fz_corr
 
+    # ----- Корреляция между двумя активами -----
+    corr_wind = tick_df.select(token_1, token_2).corr()[token_2][0]
+    corr_2h = lr_df_2h.select(token_1, token_2).corr()[token_2][0]
+    corr_5m = lr_df_2h.select(token_1, token_2).tail(12*5).corr()[token_2][0]
+
+    # ----- Еклидово расстояние между двумя активами -----
+    t1_norm = min_max_normalize(agg_hist[token_1].to_numpy())
+    t2_norm = min_max_normalize(agg_hist[token_2].to_numpy())
+    distance = np.linalg.norm(t1_norm - t2_norm)
+
     # Изменение профита и z_score за последние 2 часа
     pr_z_change, pr_fz_change = get_sensitivity(lr_df_2h, side_1)
     sens_favor, sens_adv = get_relative_sensitivity(lr_df_2h, side_1)
 
     # ----- Расчёт RSI -----
     spread_rsi_1h = rsi(agg_hist, window=14, col_name='log_spread')['rsi'][-1]
-    spread_rsi_5m = rsi(spread_5m, window=24, col_name='log_spread')['rsi'][-1]
-
-    rsi_t1_5m = rsi(spread_5m, window=24, col_name=token_1)['rsi'][-1]
-    rsi_t2_5m = rsi(spread_5m, window=24, col_name=token_2)['rsi'][-1]
     rsi_t1_1h = rsi(agg_hist, window=14, col_name=token_1)['rsi'][-1]
     rsi_t2_1h = rsi(agg_hist, window=14, col_name=token_2)['rsi'][-1]
-
-    rsi_long_5m  = rsi_t1_5m if side_1 == 'long' else rsi_t2_5m
-    rsi_short_5m = rsi_t2_5m if side_1 == 'long' else rsi_t1_5m
     rsi_long_1h  = rsi_t1_1h if side_1 == 'long' else rsi_t2_1h
     rsi_short_1h = rsi_t2_1h if side_1 == 'long' else rsi_t1_1h
 
     # ----- Расчёт линии тренда, построенной поверх логарифмического спреда -----
-    tick_spread_wind = tick_hist['log_spread'].tail(wind * 12 * 60).to_numpy() # Фильтруем только данные за {wind} часов
-    tick_spread_12 = tick_hist['log_spread'].tail(12 * 12 * 60).to_numpy()     # Фильтруем только данные за 12 часов
+    tick_spread_wind = tick_hist['log_spread'].tail(2 * wind * 12 * 60).to_numpy() # Фильтруем только данные за 2 * {wind} часов
+    tick_spread_2h = tick_hist['log_spread'].tail(2 * 12 * 60).to_numpy()     # Фильтруем только данные за 2 часа
     k_wind, b_wind = lr_coefs(tick_spread_wind)
-    k_12, b_12 = lr_coefs(tick_spread_12)
+    k_2h, b_2h = lr_coefs(tick_spread_2h)
     y_end_wind = k_wind * (len(tick_spread_wind) - 1) + b_wind
-    y_end_12 = k_12 * (len(tick_spread_12) - 1) + b_12
+    y_end_2h = k_2h * (len(tick_spread_2h) - 1) + b_2h
     trend_wind = (y_end_wind - b_wind) / b_wind * 100
-    trend_12 = (y_end_12 - b_12) / b_12 * 100
+    trend_2h = (y_end_2h - b_2h) / b_2h * 100
+
+    # ----- Расчёт коэффициента хеджирования beta с помощью LinReg -----
+    returns_df_wind = tick_df.with_columns([
+        pl.col(token_1).log().diff().alias(f"{token_1}_return"),
+        pl.col(token_2).log().diff().alias(f"{token_2}_return")
+    ]).drop_nulls().tail(2 * wind * 12 * 60)
+
+    x = returns_df_wind[f"{token_2}_return"].to_numpy()
+    y = returns_df_wind[f"{token_1}_return"].to_numpy()
+    beta_wind = np.cov(x, y)[0, 1] / np.var(x)
+
+    returns_df_2h = tick_df.with_columns([
+        pl.col(token_1).log().diff().alias(f"{token_1}_return"),
+        pl.col(token_2).log().diff().alias(f"{token_2}_return")
+    ]).drop_nulls().tail(2 * 12 * 60)
+
+    x = returns_df_2h[f"{token_2}_return"].to_numpy()
+    y = returns_df_2h[f"{token_1}_return"].to_numpy()
+    beta_2h = np.cov(x, y)[0, 1] / np.var(x)
 
     # ----- Расчёт half-life ------
     half_life_log_spread = calculate_half_life(tick_spread_wind) / 12 / 60
 
     # ----- Расчёт показателей торгового объёма -----
-    # За {wind} часов
-    tick_hist_wind = tick_hist.tail(wind * 12 * 60).with_columns(
+    # За 2 * {wind} часов
+    tick_hist_wind = tick_hist.tail(2 * wind * 12 * 60).with_columns(
         (pl.col(f'{token_1}_ask_size') * pl.col(f'{token_1}_ask_price')).alias('ask_usdt'),
         (pl.col(f'{token_1}_bid_size') * pl.col(f'{token_1}_bid_price')).alias('bid_usdt')
     )
@@ -1181,52 +1038,70 @@ def get_open_time_stats(tick_df, agg_df, token_1, token_2, side_1, side_2, open_
     z_score_5m_change_d = -(z_score_curr_d / z_score_5m_d - 1) # Минус для того, чтобы изменения в сторону среднего были положительными
     z_score_2h_change_d = -(z_score_curr_d / z_score_2h_d - 1)
 
+    # ----- Характеристики логарифмического спреда -----
+    spr_curr = tick_hist['log_spread'][-1]
+    spr_max = tick_hist['log_spread'].max()
+    spr_min = tick_hist['log_spread'].min()
+    spr_median = tick_hist['log_spread'].median()
+
+    if (spr_min > 0 and spr_max > 0) or (spr_min < 0 and spr_max < 0):
+        spr_max_dist = abs(spr_max) - abs(spr_min)
+    else:
+        spr_max_dist = abs(spr_max) + abs(spr_min)
+
+    spr_dist_to_mean = abs(spr_mean_wind) - abs(spr_curr)
+    spr_dist_from_max = abs(spr_max) - abs(spr_curr)
+
+
     return {
-        'long_std_180d': long_std_180d,
-        'short_std_180d': short_std_180d,
-        'long_beta_180d': long_beta_180d,
-        'short_beta_180d': short_beta_180d,
-        'long_pv': long_pv,
-        'short_pv': short_pv,
-        'tls_beta_180d': tls_beta,
-        'coint_180d': coint,
-        'johansen_beta_180d': hedge_r,
-        'mean_wind': mean_wind,            # Среднее значение спреда за последние wind часов
+        # ----- Характеристики спреда -----
+        'spr_curr': spr_curr,
+        'spr_min': spr_min,
+        'spr_max': spr_max,
+        'spr_median': spr_median,
+        'spr_mean': spr_mean_wind,    # Среднее значение спреда за последние wind часов
+        'spr_max_dist': spr_max_dist,
+        'spr_dist_to_mean': spr_dist_to_mean,
+        'spr_dist_from_max': spr_dist_from_max,
+        'spr_std_2h': spr_std_2h,
+        'spr_std_5m': spr_std_5m,
+
+        # ----- Характеристики волатильности -----
+        'euc_distance': distance,          # Евклидово расстояние между активами
         'long_std_wind': long_std_wind,    # Стандартное отклонение спреда за последние wind часов
         'short_std_wind': short_std_wind,
-        'mean_12h': mean_12,               # Среднее значение спреда за последние 12 часов
-        'long_std_12': long_std_12,
-        'short_std_12': short_std_12,
-        'mean_diff': mean_diff,            # Изменение среднего значения между 12 часами и wind часами в %
+        'long_std_2h': long_std_2,
+        'short_std_2h': short_std_2,
+        'long_std_5m': long_std_5m,
+        'short_std_5m': short_std_5m,
+        'mean_2h': mean_2h,                # Среднее значение спреда за последние 2 часа
+        'mean_diff': mean_diff,            # Изменение среднего значения между 2 часами и wind часами в %
         'tls_beta_wind': tls_beta_wind,
-        'tls_beta_12h': tls_beta_12,
+        'tls_beta_2h': tls_beta_2,
+        'beta_wind': beta_wind,
+        'beta_2h': beta_2h,
         'hurst_wind': H_wind,              # Показатель Хёрста за wind часов
-        'hurst_12h': H_12,                 # Показатель Хёрста за 12 часов
-        'spread_rsi_5m': spread_rsi_5m,    # Индикатор RSI на агрегированном по 5 мин спреде
-        'spread_rsi_1h': spread_rsi_1h,
-        'rsi_long_5m': rsi_long_5m,        # Индикатор RSI на агрегированном по 5 мин цене long-токена
-        'rsi_short_5m': rsi_short_5m,
-        'rsi_long_1h': rsi_long_1h,        # Индикатор RSI на агрегированном по 1 часу цене long-токена
-        'rsi_short_1h': rsi_short_1h,
+        'spread_rsi': spread_rsi_1h,
+        'rsi_long': rsi_long_1h,        # Индикатор RSI на агрегированном по 1 часу цене long-токена
+        'rsi_short': rsi_short_1h,
 
+        # ----- Корреляция -----
         'profit_z_corr': pr_z_corr,        # Корреляция между профитом и z_score за последние 2 часа перед входом в позу
         'profit_fz_corr': pr_fz_corr,      # Корреляция между профитом и fixed_z_score
         'z_fz_corr': z_fz_corr,            # Корреляция между z_score и fixed_z_score
+        'corr_wind': corr_wind,
+        'corr_2h': corr_2h,
+        'corr_5m': corr_5m,
 
         'pr_z_change': pr_z_change,       # Изменение профита на единицу изменения z_score за последние 2 часа (среднее)
         'pr_fz_change': pr_fz_change,     # Изменение профита на единицу изменения fixed_z_score за последние 2 часа (среднее)
         'profit_sens_fav': sens_favor,    # Только такие изменения z_score, которые улучшают z_score
         'profit_sens_adv': sens_adv,      # Только такие изменения z_score, которые ухудшают z_score
         'trend_wind': trend_wind,         # Отношение конца регрессионной прямой к началу за wind часов
-        'trend_12h': trend_12,
+        'trend_2h': trend_2h,
         'half_life_log_spread': half_life_log_spread,
-        'long_btc_corr': long_btc_corr,      # Корреляция long-токена с BTC long-ноги
-        'short_btc_corr': short_btc_corr,
-        'long_eth_corr': long_eth_corr,      # Корреляция long-токена с ETH
-        'short_eth_corr': short_eth_corr,
-        'long_sol_corr': long_sol_corr,      # Корреляция long-токена с SOL
-        'short_sol_corr': short_sol_corr,
 
+        # ----- Характеристики объёмов покупок и продаж -----
         'ask_usdt_mean_wind': ask_usdt_mean_wind, # Торговый объём в usdt (ask) за последние {wind} часов
         'bid_usdt_mean_wind': bid_usdt_mean_wind, # Торговый объём в usdt (bid) за последние {wind} часов
         'bid_ask_ratio_wind': bid_ask_ratio_wind,

@@ -353,8 +353,6 @@ def backtest_fast(time_arr, z_score, currspr_arr, spread_arr, std_arr, bid_1, as
             avg_2 = (bid_2[i] + ask_2[i]) / 2.0
             fixed_z_score = (currspr_arr[i] - fixed_mean) / fixed_std
 
-            out_condition = z if close_method == 0 else fixed_z_score
-
             # --- Проверяем стоп-лосс ---
             if abs(fixed_z_score) > sl_std and pos_side == POS_SHORT:
                 signal = SIG_SHORT_CLOSE
@@ -378,20 +376,20 @@ def backtest_fast(time_arr, z_score, currspr_arr, spread_arr, std_arr, bid_1, as
                     reason = REASON_FORCE
 
                 # Прямой способ (когда z_score входит в диапазон выхода)
-                if not dist_out:
-                    if out_condition < thresh_low_out:
+                if close_method == 0:
+                    if z < thresh_low_out:
                         signal = SIG_SHORT_CLOSE
                         reason = REASON_THRESHOLD
                 # Выходим из сделки, когда z_score покидает диапазон выхода
                 else:
                     # Начинаем отслеживать, когда спред опускается ниже порога выхода
-                    if not short_out_min_value and out_condition < thresh_low_out:
-                        short_out_min_value = out_condition
+                    if not short_out_min_value and z < thresh_low_out:
+                        short_out_min_value = z
                     # Если спред обновляет минимум
-                    elif short_out_min_value and out_condition < short_out_min_value:
-                        short_out_min_value = out_condition
+                    elif short_out_min_value and z < short_out_min_value:
+                        short_out_min_value = z
                     # Если спред откатывается на dist_out от минимума
-                    elif short_out_min_value and out_condition > short_out_min_value + dist_out and out_condition < thresh_low_out:
+                    elif short_out_min_value and z > short_out_min_value + dist_out and z < thresh_low_out:
                         signal = SIG_SHORT_CLOSE
                         reason = REASON_THRESHOLD
                         short_out_min_value = 0
@@ -402,20 +400,20 @@ def backtest_fast(time_arr, z_score, currspr_arr, spread_arr, std_arr, bid_1, as
                     reason = REASON_FORCE
 
                 # Прямой способ (когда z_score входит в диапазон выхода)
-                if not dist_out:
-                    if out_condition > thresh_high_out:
+                if close_method == 0:
+                    if z > thresh_high_out:
                         signal = SIG_LONG_CLOSE
                         reason = REASON_THRESHOLD
                 # Выходим из сделки, когда z_score покидает диапазон выхода
                 else:
                     # Начинаем отслеживать, когда спред опускается ниже порога выхода
-                    if not long_out_max_value and out_condition > thresh_high_out:
-                        long_out_max_value = out_condition
+                    if not long_out_max_value and z > thresh_high_out:
+                        long_out_max_value = z
                     # Если спред обновляет максимум
-                    elif long_out_max_value and out_condition > long_out_max_value:
-                        long_out_max_value = out_condition
+                    elif long_out_max_value and z > long_out_max_value:
+                        long_out_max_value = z
                     # Если спред откатывается на dist_out от максимума
-                    elif long_out_max_value and out_condition < long_out_max_value - dist_out and out_condition > thresh_high_out:
+                    elif long_out_max_value and z < long_out_max_value - dist_out and z > thresh_high_out:
                         signal = SIG_LONG_CLOSE
                         reason = REASON_THRESHOLD
                         long_out_max_value = 0
@@ -449,7 +447,7 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
 
     sl_map = {None: 0, 'counter': 1, 'leave': 2}
     qty_map = {'usdt_neutral': USDT_NEUT, 'vol_neutral': VOL_NEUT}
-    close_map = {'direct': 0, 'fix': 1}
+    close_map = {'direct': 0, 'reverse': 1}
     open_map = {'direct': 0, 'reverse_dynamic': 1, 'reverse_static': 2}
 
     if qty_method == 'vol_neutral' and (std_1 is None or std_2 is None):

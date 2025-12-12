@@ -8,6 +8,7 @@ import ast
 from datetime import datetime, timedelta
 from hurst import compute_Hc
 from bot.indicators.rsi import rsi
+from bot.utils.files import load_config
 
 def round_down(value: float, dp: float):
     return round(math.floor(value / dp) * dp, 6)
@@ -326,15 +327,15 @@ def get_dist_zscore(t1: np.ndarray, t2: np.ndarray, winds: np.ndarray):
 
 @njit(cache=True)
 def calculate_z_score(start_ts: int,
-                        median_length: int,
-                        tss: np.ndarray,
-                        price1: np.ndarray,
-                        price2: np.ndarray,
-                        hist_ts: np.ndarray,
-                        hist_t1: np.ndarray,
-                        hist_t2: np.ndarray,
-                        winds: np.ndarray,
-                        spr_method: int):
+                    median_length: int,
+                    tss: np.ndarray,
+                    price1: np.ndarray,
+                    price2: np.ndarray,
+                    hist_ts: np.ndarray,
+                    hist_t1: np.ndarray,
+                    hist_t2: np.ndarray,
+                    winds: np.ndarray,
+                    spr_method: int):
     """
     Функция на исторических данных рассчитывает z_score для каждой строки.
     Последний элемент в агрегированном датафрейме отбрасывается, так как
@@ -355,6 +356,7 @@ def calculate_z_score(start_ts: int,
         min_order: размер минимального ордера в usdt для фильтрации слишком малого объёма
 
     """
+    step = tss[1] - tss[0]
     nrows = tss.shape[0]
     n_winds = winds.shape[0]
     ts_arr = np.full(nrows, np.nan)
@@ -365,7 +367,7 @@ def calculate_z_score(start_ts: int,
 
     for i in range(nrows):
         # Пропускаем начало датафрейма, нужное для вычисления медианы
-        if tss[i] <= start_ts:
+        if tss[i] <= start_ts + median_length * step:
             continue
 
         t1_price = price1[i - median_length: i]
@@ -393,7 +395,9 @@ def calculate_z_score(start_ts: int,
         spr_std_arr[i] = spread_std
         z_score_arr[i] = zscore
 
-    return ts_arr, spread_arr, spr_mean_arr, spr_std_arr, z_score_arr
+    t = median_length + 1
+
+    return ts_arr[t:], spread_arr[t:], spr_mean_arr[t:], spr_std_arr[t:], z_score_arr[t:]
 
 def create_zscore_df(token_1, token_2, sec_df, agg_df, tf, winds, start_ts, median_length, spr_method):
     if spr_method == 'lr':
@@ -420,11 +424,14 @@ def create_zscore_df(token_1, token_2, sec_df, agg_df, tf, winds, start_ts, medi
     # --- Собираем итоговый polars DataFrame из буферов (только заполненные строки) ---
     base_df = pl.DataFrame({'ts': tss})
     for i, wind in enumerate(winds):
-        tdf = pl.DataFrame({'ts': tss,
+        tdf = pl.DataFrame({'ts': ts_arr,
                         f'spread_{wind}_{tf}': spr_arr[:, i],
                         f'spread_mean_{wind}_{tf}': spr_mean_arr[:, i],
                         f'spread_std_{wind}_{tf}': spr_std_arr[:, i],
-                        f'z_score_{wind}_{tf}': z_score_arr[:, i]})
+                        f'z_score_{wind}_{tf}': z_score_arr[:, i]}
+            ).with_columns(
+                pl.col('ts').cast(pl.Int64)
+            )
         base_df = base_df.join(tdf, on='ts')
 
     return sec_df.select('time', 'ts', token_1, token_2,
@@ -623,13 +630,25 @@ def load_data(token_1, token_2, valid_time, end_time, tf, wind, db_manager):
         start_time = valid_time - timedelta(hours=train_length)
 
         df_1 = db_manager.get_tick_ob(token=token_1 + '_USDT',
-                                         start_time=start_time,
+                                         start_time=valid_time,
                                          end_time=end_time)
         df_2 = db_manager.get_tick_ob(token=token_2 + '_USDT',
-                                         start_time=start_time,
+                                         start_time=valid_time,
                                          end_time=end_time)
-        tick_df = make_df_from_orderbooks(df_1, df_2, token_1, token_2, start_time=start_time)
-        agg_df = make_trunc_df(tick_df, timeframe=tf, token_1=token_1, token_2=token_2, method='triple')
+        tick_df = make_df_from_orderbooks(df_1, df_2, token_1, token_2, start_time=valid_time)
+        tick_df = tick_df.with_columns(
+                (pl.col(token_1).log() - pl.col(token_2).log()).alias('log_spread')
+            )
+
+        df_1_hist = db_manager.get_orderbooks(token_1 + '_USDT', tf, start_time, end_time)
+        df_2_hist = db_manager.get_orderbooks(token_2 + '_USDT', tf, start_time, end_time)
+
+        agg_df = df_1_hist.select('time', 'price').rename({'price': token_1}).join(
+                df_2_hist.select('time', 'price').rename({'price': token_2}), on='time'
+            ).with_columns(
+                (pl.col("time").dt.timestamp("ms") / 1000).cast(pl.Int64).alias("ts"),
+                (pl.col(token_1).log() - pl.col(token_2).log()).alias('log_spread')
+            )
 
         return tick_df, agg_df
 
@@ -796,55 +815,103 @@ def min_max_normalize(prices):
     """Нормировка цен в диапазон [0, 1]"""
     return (prices - np.min(prices)) / (np.max(prices) - np.min(prices))
 
-def get_open_time_stats(tick_df, agg_df, token_1, token_2, side_1, side_2, open_time, tf, wind, thresh_out, coin_information):
-    # Проследить, чтобы tick_df начинался не за wind часов от момента входа, а раньше ещё на несколько часов, чтобы
-    # можно было посчитать статы
+def calculate_lr_on_dataset(df, token_1, token_2):
+    # Подготовка данных
+    x = df[token_1].to_numpy()
+    y = df[token_2].to_numpy()
 
-    tick_hist = tick_df.filter(pl.col('time') < open_time).with_columns(
-            (pl.col(token_1).log() - pl.col(token_2).log()).alias('log_spread')
-        )
-    agg_hist = agg_df.filter(pl.col('time') < open_time).with_columns(
-            (pl.col(token_1).log() - pl.col(token_2).log()).alias('log_spread')
-        )
+    # Вычисление коэффициентов регрессии аналитически
+    n = len(x)
+    sum_x = np.sum(x)
+    sum_y = np.sum(y)
+    sum_xx = np.sum(x * x)
+    sum_xy = np.sum(x * y)
+
+    # Коэффициенты регрессии: y = alpha + beta * x
+    beta = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x)
+    alpha = (sum_y - beta * sum_x) / n
+
+    # Вычисление спреда (остатки регрессии)
+    spread = y - (alpha + beta * x)
+
+    # Статистики спреда
+    # mean_spread = np.mean(spread)
+    # std_spread = np.std(spread, ddof=1)  # несмещенная оценка
+
+    # Добавляем спред в датафрейм
+    result_df = df.with_columns(pl.Series('spread', spread))
+
+    return result_df
+
+def get_open_time_stats(token_1: str,
+                        token_2: str,
+                        side_1: str,
+                        open_time: datetime,
+                        hours_back: int,
+                        coin_information: dict,
+                        db_manager):
+    """
+    Расчёт параметров сделки на момент открытия позиции
+
+    Args:
+        token_1: Название токена 1.
+        token_2: Название токена 2.
+        side_1: Направление открытой позиции. Отсчитывается по токену 1.
+        open_time: время открытия позиции.
+        tf: Таймфрейм ('1h', '4h', etc)
+        wind: Размер скользящего окна.
+        hours_back: за сколько часов до открытия сделки считать статы.
+        coin_information: словарь с технической информацией по токенам.
+        db_manager: экземпляр класса DBManager.
+    """
+
+    config = load_config('./bot/config/config.yaml')
+    tf = config['tf']
+    wind = config['wind']
+    thresh_in = config['thresh_in']
+    thresh_out = config['thresh_out']
+    sl_spread_std = config['sl_spread_std']
+
+    start_time = open_time - timedelta(hours=hours_back)
+
+    # ----- Загружаем данные -----
+    tick_df, agg_df = load_data(token_1, token_2, start_time, open_time, tf, wind, db_manager)
 
     # ----- Собираем статистику за 2*{wind} часов -----
-    agg_df_wind = agg_hist.with_columns([
+    df_wind = agg_df.with_columns([
         pl.col(token_1).pct_change().std().alias("vol_1"),
         pl.col(token_2).pct_change().std().alias("vol_2"),
-        pl.col('log_spread').mean().alias('mean')
+        pl.col('log_spread').mean().alias('spread_mean')
     ])
 
-    spr_mean_wind = agg_df_wind["mean"][0]
+    spr_mean_wind = df_wind["spread_mean"][0]
 
-    long_std_wind = agg_df_wind["vol_1"][0] if side_1 == 'long' else agg_df_wind["vol_2"][0]
-    short_std_wind = agg_df_wind["vol_2"][0] if side_1 == 'long' else agg_df_wind["vol_1"][0]
-    tls_beta_wind = calculate_tls_beta(agg_df_wind[token_1].to_numpy(), agg_df_wind[token_2].to_numpy())
+    long_std_wind = df_wind["vol_1"][0] if side_1 == 'long' else df_wind["vol_2"][0]
+    short_std_wind = df_wind["vol_2"][0] if side_1 == 'long' else df_wind["vol_1"][0]
+    tls_beta_wind = calculate_tls_beta(df_wind[token_1].to_numpy(),
+                                       df_wind[token_2].to_numpy())
 
-    # Hurst Exponent за 2*{wind} часов. Аггрегируем данные по 20 минут, чтобы избавиться от шума
-    spread_20m = make_trunc_df(tick_hist, '20m', token_1, token_2, method="triple").with_columns(
-            (pl.col(token_1).log() - pl.col(token_2).log()).alias('log_spread')
-        ).filter(pl.col('time') < open_time).tail(6*wind)
-    H_wind, _, _ = compute_Hc(spread_20m['log_spread'])
+    # Hurst Exponent за 2*{wind} часов
+    H_wind, _, _ = compute_Hc(agg_df['log_spread'])
 
-    # ----- Собираем статистику за 2 часа -----
-    agg_df_2 = tick_hist.filter(
-            pl.col('time') > open_time - timedelta(hours=2)
-        ).with_columns([
+    # ----- Волатильность активов за {hours_back} часов -----
+    df_hb = tick_df.with_columns([
             pl.col(token_1).pct_change().std().alias("vol_1"),
             pl.col(token_2).pct_change().std().alias("vol_2"),
-            pl.col('log_spread').mean().alias('mean')
+            pl.col('log_spread').mean().alias('spread_mean')
     ])
 
-    mean_2h = agg_df_2["mean"][0]
+    spr_mean_hb = df_hb["spread_mean"][0]
 
-    long_std_2 = agg_df_2["vol_1"][0] if side_1 == 'long' else agg_df_2["vol_2"][0]
-    short_std_2 = agg_df_2["vol_2"][0] if side_1 == 'long' else agg_df_2["vol_1"][0]
-    tls_beta_2 = calculate_tls_beta(agg_df_2[token_1].to_numpy(), agg_df_2[token_2].to_numpy())
+    long_std_hb = df_hb["vol_1"][0] if side_1 == 'long' else df_hb["vol_2"][0]
+    short_std_hb = df_hb["vol_2"][0] if side_1 == 'long' else df_hb["vol_1"][0]
+    tls_beta_hb = calculate_tls_beta(df_hb[token_1].to_numpy(), df_hb[token_2].to_numpy())
 
-    mean_diff = (mean_2h / spr_mean_wind - 1) * 100 # Изменение среднего значения лог-спреда
+    # Изменение среднего значения лог-спреда
+    spr_mean_diff = (spr_mean_hb / spr_mean_wind - 1) * 100
 
     # ----- Собираем статистику за 5 минут -----
-    agg_df_5m = tick_hist.filter(
+    df_5m = tick_df.filter(
             pl.col('time') > open_time - timedelta(minutes=5)
         ).with_columns([
             pl.col(token_1).pct_change().std().alias("vol_1"),
@@ -852,43 +919,129 @@ def get_open_time_stats(tick_df, agg_df, token_1, token_2, side_1, side_2, open_
             pl.col('log_spread').mean().alias('mean')
     ])
 
-    long_std_5m = agg_df_5m["vol_1"][0] if side_1 == 'long' else agg_df_5m["vol_2"][0]
-    short_std_5m = agg_df_5m["vol_2"][0] if side_1 == 'long' else agg_df_5m["vol_1"][0]
+    long_std_5m = df_5m["vol_1"][0] if side_1 == 'long' else df_5m["vol_2"][0]
+    short_std_5m = df_5m["vol_2"][0] if side_1 == 'long' else df_5m["vol_1"][0]
 
-    # ----- Корреляция между движением z_score и профита за последние 2 часа -----
-    start_track_time = open_time - timedelta(hours=2)
-    start_track_ts = int(datetime.timestamp(start_track_time))
-
-    tick_2h_df = tick_df.filter(pl.col('time') < open_time)
-    hist_2h_df = agg_df.filter(pl.col('time') < open_time)
-
-    # Создадим z_score датафрейм за последние 2 часа перед входом в сделку
-    lr_df_2h = create_zscore_df(token_1, token_2, tick_2h_df, hist_2h_df, tf, np.array([wind]), start_track_ts,
-                    median_length=6, spr_method='lr'
+    # ----- Линейная регрессия за последние {hours_back} часов -----
+    start_track_ts = tick_df['ts'][0]
+    lr_df = create_zscore_df(token_1, token_2, tick_df, agg_df, tf,
+            np.array([wind]), start_track_ts, median_length=6, spr_method='lr'
         ).rename({f'spread_{wind}_{tf}': 'spread', f'spread_mean_{wind}_{tf}':
-                  'spread_mean', f'spread_std_{wind}_{tf}': 'spread_std', f'z_score_{wind}_{tf}': 'z_score'})
-
-    # Волатильность спреда за последние 2 часа и 5 минут
-    spr_std_2h = lr_df_2h['spread'].std()
-    spr_std_5m = lr_df_2h['spread'].tail(12*5).std()
-
-
+                  'spread_mean', f'spread_std_{wind}_{tf}': 'spread_std',
+                  f'z_score_{wind}_{tf}': 'z_score'})
+    # Создадим столбец с профитом
+    t1_op = lr_df[token_1][0]
+    t2_op = lr_df[token_2][0]
+    t1_qty, t2_qty = get_qty(token_1, token_2, t1_op, t2_op, None,
+                            coin_information, 200, method='usdt_neutral')
+    lr_df = calculate_profit_curve(lr_df, token_1, token_2, side_1,
+                            t1_op, t2_op, t1_qty, t2_qty, fee_rate=0.001)
     # Посчитаем z_score с зафиксированным при входе mean и std
-    fixed_mean = lr_df_2h['spread_mean'][0]
-    fixed_std = lr_df_2h['spread_std'][0]
+    lr_fixed_mean = lr_df['spread_mean'][0]
+    lr_fixed_std = lr_df['spread_std'][0]
 
-    lr_df_2h = lr_df_2h.with_columns(
-            ((pl.col('spread') - fixed_mean) / fixed_std).alias('fixed_z_score')
+    lr_df = lr_df.with_columns(
+            ((pl.col('spread') - lr_fixed_mean) / lr_fixed_std).alias('fixed_z_score')
         )
 
-    # Создадим столбец с профитом
-    t1_op = lr_df_2h[token_1][0]
-    t2_op = lr_df_2h[token_2][0]
-    t1_qty, t2_qty = get_qty(token_1, token_2, t1_op, t2_op, None, coin_information, 100, method='usdt_neutral')
-    lr_df_2h = calculate_profit_curve(lr_df_2h, token_1, token_2, side_1, t1_op, t2_op, t1_qty, t2_qty, fee_rate=0.001)
+    # Характеристики спреда, посчитанного с помощью LinReg
+    lr_spr_curr = lr_df['spread'][-1]
+    lr_spr_mean = lr_df['spread'].mean()
+    lr_spr_median = lr_df['spread'].median()
+
+    if side_1 == 'long':
+        lr_spr_far = lr_df['spread'].min()
+        lr_spr_close = lr_df['spread'].max()
+        far_idx = lr_df['spread'].arg_min()
+    elif side_1 == 'short':
+        lr_spr_far = lr_df['spread'].max()
+        lr_spr_close = lr_df['spread'].min()
+        far_idx = lr_df['spread'].arg_max()
+
+    # Датафрейм с отрезком движения z_score от максимального удаления к моменту входа в позицию
+    upswing_df = lr_df[far_idx :]
+
+    # Датафрейм с отрезком движения до точки максимального удаления от нулевого z_score
+    if side_1 == 'long':
+        close_idx = lr_df[:far_idx]['spread'].arg_max()
+    elif side_1 == 'short':
+        close_idx = lr_df[:far_idx]['spread'].arg_min()
+
+    downswing_df = lr_df[close_idx : far_idx]
+
+    # Потенциальный профит и убыток
+    pos_profit_move = upswing_df['profit'][-1] - upswing_df['profit'][0]
+    pos_spread_move = upswing_df['spread'][-1] - upswing_df['spread'][0]
+    pos_z_move = upswing_df['z_score'][-1] - upswing_df['z_score'][0]
+
+    neg_profit_move = downswing_df['profit'][-1] - downswing_df['profit'][0]
+    neg_spread_move = downswing_df['spread'][-1] - downswing_df['spread'][0]
+    neg_z_move = downswing_df['z_score'][-1] - downswing_df['z_score'][0]
+
+    # Движение профита на единицу движения спреда и z_score
+    pos_sens = pos_profit_move / pos_spread_move
+    neg_sens = neg_profit_move / neg_spread_move
+    pos_sens_z = pos_profit_move / pos_z_move
+    neg_sens_z = neg_profit_move / neg_z_move
+
+    sens_ratio = pos_sens / neg_sens - 1
+    sens_ratio_z = pos_sens_z / neg_sens_z - 1
+
+    if side_1 == 'long':
+        assert pos_profit_move > 0
+        assert pos_spread_move > 0
+        assert pos_z_move > 0
+        assert neg_profit_move < 0
+        assert neg_spread_move < 0
+        assert neg_z_move < 0
+    elif side_1 == 'short':
+        assert pos_profit_move > 0
+        assert pos_spread_move < 0
+        assert pos_z_move < 0
+        assert neg_profit_move < 0
+        assert neg_spread_move > 0
+        assert neg_z_move > 0
+
+        pos_spread_move = abs(pos_spread_move)
+        pos_z_move = abs(pos_z_move)
+        neg_spread_move = -neg_spread_move
+        neg_z_move = -neg_z_move
+
+    pos_distance = thresh_in + thresh_out
+    neg_distance = sl_spread_std - thresh_in
+
+    potential_profit = pos_profit_move / pos_z_move * pos_distance
+    potential_profit_spr = pos_profit_move / pos_spread_move * abs(lr_spr_curr)
+    potential_loss = -neg_profit_move / neg_z_move * neg_distance
+    profit_loss_ratio = potential_profit / potential_loss
+
+    # Максимальный разброс спреда
+    if (lr_spr_close > 0 and lr_spr_far > 0) or (lr_spr_close < 0 and lr_spr_far < 0):
+        lr_spr_max_range = abs(lr_spr_far - lr_spr_close)
+    else:
+        lr_spr_max_range = abs(lr_spr_far) + abs(lr_spr_close)
+
+    # Расстояние от максимума до текущего значения
+    if (lr_spr_curr > 0 and lr_spr_far > 0) or (lr_spr_curr < 0 and lr_spr_far < 0):
+        lr_spr_curr_dist_from_max = abs(lr_spr_far - lr_spr_curr)
+    else:
+        lr_spr_curr_dist_from_max = abs(lr_spr_far) + abs(lr_spr_curr)
+
+    # Волатильность спреда за последние {hours_back} часов и 5 минут
+    lr_spr_std_hb = lr_df['spread'].std()
+    lr_spr_std_5m = lr_df['spread'].tail(12*5).std()
+
+    # ----- Характеристики z_score линейной регрессии за последние 5 минут -----
+    lr_df_5m = lr_df.tail(12 * 5)
+
+    lr_z_curr = lr_df_5m['z_score'][-1]
+    lr_z_5m = lr_df_5m['z_score'][0]
+
+    z_score_5m_change = abs(lr_z_5m / lr_z_curr - 1)
+    z_score_5m_dist = abs(lr_z_curr - lr_z_5m)
 
     # Корреляция между движением профита и z_score
-    corr_matrix = lr_df_2h.select('z_score', 'fixed_z_score', 'profit').corr()
+    corr_matrix = lr_df.select('z_score', 'fixed_z_score', 'profit').corr()
     pr_z_corr  = corr_matrix['profit'][0]  # Корреляция между профитом и z_score
     pr_fz_corr = corr_matrix['profit'][1]  # Корреляция между профитом и fixed_z_score
     z_fz_corr  = corr_matrix['z_score'][1] # Корреляция между z_score и fixed_z_score
@@ -899,253 +1052,298 @@ def get_open_time_stats(tick_df, agg_df, token_1, token_2, side_1, side_2, open_
 
     # ----- Корреляция между двумя активами -----
     corr_wind = tick_df.select(token_1, token_2).corr()[token_2][0]
-    corr_2h = lr_df_2h.select(token_1, token_2).corr()[token_2][0]
-    corr_5m = lr_df_2h.select(token_1, token_2).tail(12*5).corr()[token_2][0]
+    corr_hb = lr_df.select(token_1, token_2).corr()[token_2][0]
+    corr_5m = lr_df.select(token_1, token_2).tail(12*5).corr()[token_2][0]
 
     # ----- Еклидово расстояние между двумя активами -----
-    t1_norm = min_max_normalize(agg_hist[token_1].to_numpy())
-    t2_norm = min_max_normalize(agg_hist[token_2].to_numpy())
+    t1_norm = min_max_normalize(agg_df[token_1].to_numpy())
+    t2_norm = min_max_normalize(agg_df[token_2].to_numpy())
     distance = np.linalg.norm(t1_norm - t2_norm)
 
-    # Изменение профита и z_score за последние 2 часа
-    pr_z_change, pr_fz_change = get_sensitivity(lr_df_2h, side_1)
-    sens_favor, sens_adv = get_relative_sensitivity(lr_df_2h, side_1)
-
     # ----- Расчёт RSI -----
-    spread_rsi_1h = rsi(agg_hist, window=14, col_name='log_spread')['rsi'][-1]
-    rsi_t1_1h = rsi(agg_hist, window=14, col_name=token_1)['rsi'][-1]
-    rsi_t2_1h = rsi(agg_hist, window=14, col_name=token_2)['rsi'][-1]
+    spread_rsi_1h = rsi(agg_df, window=14, col_name='log_spread')['rsi'][-1]
+    rsi_t1_1h = rsi(agg_df, window=14, col_name=token_1)['rsi'][-1]
+    rsi_t2_1h = rsi(agg_df, window=14, col_name=token_2)['rsi'][-1]
     rsi_long_1h  = rsi_t1_1h if side_1 == 'long' else rsi_t2_1h
     rsi_short_1h = rsi_t2_1h if side_1 == 'long' else rsi_t1_1h
 
     # ----- Расчёт линии тренда, построенной поверх логарифмического спреда -----
-    tick_spread_wind = tick_hist['log_spread'].tail(2 * wind * 12 * 60).to_numpy() # Фильтруем только данные за 2 * {wind} часов
-    tick_spread_2h = tick_hist['log_spread'].tail(2 * 12 * 60).to_numpy()     # Фильтруем только данные за 2 часа
+    tick_spread_wind = tick_df['log_spread'].to_numpy()
+    tick_spread_hb = tick_df['log_spread'].tail(hours_back * 12 * 60).to_numpy()
     k_wind, b_wind = lr_coefs(tick_spread_wind)
-    k_2h, b_2h = lr_coefs(tick_spread_2h)
+    k_hb, b_hb = lr_coefs(tick_spread_hb)
     y_end_wind = k_wind * (len(tick_spread_wind) - 1) + b_wind
-    y_end_2h = k_2h * (len(tick_spread_2h) - 1) + b_2h
+    y_end_hb = k_hb * (len(tick_spread_hb) - 1) + b_hb
     trend_wind = (y_end_wind - b_wind) / b_wind * 100
-    trend_2h = (y_end_2h - b_2h) / b_2h * 100
+    trend_hb = (y_end_hb - b_hb) / b_hb * 100
 
     # ----- Расчёт коэффициента хеджирования beta с помощью LinReg -----
-    returns_df_wind = tick_df.with_columns([
-        pl.col(token_1).log().diff().alias(f"{token_1}_return"),
-        pl.col(token_2).log().diff().alias(f"{token_2}_return")
-    ]).drop_nulls().tail(2 * wind * 12 * 60)
+    log_df_wind = tick_df.with_columns([
+        pl.col(token_1).log().alias(token_1),
+        pl.col(token_2).log().alias(token_2)
+    ]).drop_nulls()
 
-    x = returns_df_wind[f"{token_2}_return"].to_numpy()
-    y = returns_df_wind[f"{token_1}_return"].to_numpy()
+    x = log_df_wind[token_2].to_numpy()
+    y = log_df_wind[token_1].to_numpy()
     beta_wind = np.cov(x, y)[0, 1] / np.var(x)
 
-    returns_df_2h = tick_df.with_columns([
-        pl.col(token_1).log().diff().alias(f"{token_1}_return"),
-        pl.col(token_2).log().diff().alias(f"{token_2}_return")
-    ]).drop_nulls().tail(2 * 12 * 60)
+    log_df_hb = tick_df.with_columns([
+        pl.col(token_1).log().alias(token_1),
+        pl.col(token_2).log().alias(token_2)
+    ]).drop_nulls().tail(hours_back * 12 * 60)
 
-    x = returns_df_2h[f"{token_2}_return"].to_numpy()
-    y = returns_df_2h[f"{token_1}_return"].to_numpy()
-    beta_2h = np.cov(x, y)[0, 1] / np.var(x)
+    x = log_df_hb[token_2].to_numpy()
+    y = log_df_hb[token_1].to_numpy()
+    beta_hb = np.cov(x, y)[0, 1] / np.var(x)
 
     # ----- Расчёт half-life ------
     half_life_log_spread = calculate_half_life(tick_spread_wind) / 12 / 60
 
+    lr_spread = calculate_lr_on_dataset(agg_df, token_1, token_2)['spread'].to_numpy()
+    half_life_lr_spread = calculate_half_life(lr_spread)
+
     # ----- Расчёт показателей торгового объёма -----
     # За 2 * {wind} часов
-    tick_hist_wind = tick_hist.tail(2 * wind * 12 * 60).with_columns(
+    tick_df_wind = tick_df.tail(2 * wind * 12 * 60).with_columns(
         (pl.col(f'{token_1}_ask_size') * pl.col(f'{token_1}_ask_price')).alias('ask_usdt'),
         (pl.col(f'{token_1}_bid_size') * pl.col(f'{token_1}_bid_price')).alias('bid_usdt')
     )
-    ask_usdt_mean_wind = tick_hist_wind['ask_usdt'].mean()
-    bid_usdt_mean_wind = tick_hist_wind['bid_usdt'].mean()
+    ask_usdt_mean_wind = tick_df_wind['ask_usdt'].mean()
+    bid_usdt_mean_wind = tick_df_wind['bid_usdt'].mean()
     bid_ask_ratio_wind = bid_usdt_mean_wind / ask_usdt_mean_wind - 1
 
-    # За последние 2 часа
-    tick_hist_2h = tick_hist.tail(2 * 12 * 60).with_columns(
+    # За последние hours_back часов
+    tick_df_hb = tick_df.tail(2 * 12 * 60).with_columns(
         (pl.col(f'{token_1}_ask_size') * pl.col(f'{token_1}_ask_price')).alias('ask_usdt'),
         (pl.col(f'{token_1}_bid_size') * pl.col(f'{token_1}_bid_price')).alias('bid_usdt')
     )
 
-    ask_usdt_mean_2h = tick_hist_2h['ask_usdt'].mean()
-    bid_usdt_mean_2h = tick_hist_2h['bid_usdt'].mean()
-    bid_ask_ratio_2h = bid_usdt_mean_2h / ask_usdt_mean_2h - 1
+    ask_usdt_mean_hb = tick_df_hb['ask_usdt'].mean()
+    bid_usdt_mean_hb = tick_df_hb['bid_usdt'].mean()
+    bid_ask_ratio_hb = bid_usdt_mean_hb / ask_usdt_mean_hb - 1
 
     # За последние 5 минут
-    tick_hist_5m = tick_hist.tail(12 * 5).with_columns(
+    tick_df_5m = tick_df.tail(12 * 5).with_columns(
         (pl.col(f'{token_1}_ask_size') * pl.col(f'{token_1}_ask_price')).alias('ask_usdt'),
         (pl.col(f'{token_1}_bid_size') * pl.col(f'{token_1}_bid_price')).alias('bid_usdt')
     )
-    ask_usdt_mean_5m = tick_hist_5m['ask_usdt'].mean()
-    bid_usdt_mean_5m = tick_hist_5m['bid_usdt'].mean()
+    ask_usdt_mean_5m = tick_df_5m['ask_usdt'].mean()
+    bid_usdt_mean_5m = tick_df_5m['bid_usdt'].mean()
     bid_ask_ratio_5m = bid_usdt_mean_5m / ask_usdt_mean_5m - 1
 
     # Отношение объёмов за последние 5 минут и 2 часа к историческим
-    ask_5m_2h_ratio = ask_usdt_mean_5m / ask_usdt_mean_2h - 1
-    bid_5m_2h_ratio = bid_usdt_mean_5m / bid_usdt_mean_2h - 1
+    ask_5m_hb_ratio = ask_usdt_mean_5m / ask_usdt_mean_hb - 1
+    bid_5m_hb_ratio = bid_usdt_mean_5m / bid_usdt_mean_hb - 1
     ask_5m_wind_ratio = ask_usdt_mean_5m / ask_usdt_mean_wind - 1
     bid_5m_wind_ratio = bid_usdt_mean_5m / bid_usdt_mean_wind - 1
-    ask_2h_wind_ratio = ask_usdt_mean_2h / ask_usdt_mean_wind - 1
-    bid_2h_wind_ratio = bid_usdt_mean_2h / bid_usdt_mean_wind - 1
+    ask_hb_wind_ratio = ask_usdt_mean_hb / ask_usdt_mean_wind - 1
+    bid_hb_wind_ratio = bid_usdt_mean_hb / bid_usdt_mean_wind - 1
 
-    # ----- Характеристики z_score линейной регрессии -----
-    lr_df_5m = lr_df_2h.tail(12 * 5)
-    z_score_curr = lr_df_2h['z_score'][-1]
-    z_score_5m = lr_df_5m['z_score'][0]
-    z_score_2h = lr_df_2h['z_score'][0]
-    z_score_min = lr_df_2h['z_score'].min()
-    z_score_max = lr_df_2h['z_score'].max()
-    z_score_mean = lr_df_2h['z_score'].mean()
-    z_score_median = lr_df_2h['z_score'].median()
-
-    if (z_score_min > 0 and z_score_max > 0) or (z_score_min < 0 and z_score_max < 0):
-        z_score_max_dist = abs(z_score_max) - abs(z_score_min)
-    else:
-        z_score_max_dist = abs(z_score_max) + abs(z_score_min)
-
-    z_score_dist_to_target = abs(z_score_curr) + thresh_out
-    z_score_dist_from_max = abs(z_score_max) - abs(z_score_curr)
-    z_score_dist_from_mean = abs(z_score_mean) - abs(z_score_curr)
-    z_score_dist_from_median = abs(z_score_median) - abs(z_score_curr)
-
-    z_score_5m_change = -(z_score_curr / z_score_5m - 1) # Минус для того, чтобы изменения в сторону среднего были положительными
-    z_score_2h_change = -(z_score_curr / z_score_2h - 1)
-
-    # ----- Характеристики z_score дистанционного метода -----
-    dist_df_2h = create_zscore_df(token_1, token_2, tick_2h_df, hist_2h_df, tf, np.array([wind]), start_track_ts,
-                    median_length=6, spr_method='dist'
+    # ----- Характеристики z_score дистанционного метода за {hours_back} часов -----
+    dist_df = create_zscore_df(token_1, token_2, tick_df, agg_df, tf,
+            np.array([wind]), start_track_ts, median_length=6, spr_method='dist'
         ).rename({f'spread_{wind}_{tf}': 'spread', f'spread_mean_{wind}_{tf}':
                   'spread_mean', f'spread_std_{wind}_{tf}': 'spread_std', f'z_score_{wind}_{tf}': 'z_score'})
-    dist_df_5m = dist_df_2h.tail(12 * 5)
+    dist_df = calculate_profit_curve(dist_df, token_1, token_2, side_1,
+                            t1_op, t2_op, t1_qty, t2_qty, fee_rate=0.001)
 
-    z_score_curr_d = dist_df_2h['z_score'][-1]
-    z_score_5m_d = dist_df_5m['z_score'][0]
-    z_score_2h_d = dist_df_2h['z_score'][0]
-    z_score_min_d = dist_df_2h['z_score'].min()
-    z_score_max_d = dist_df_2h['z_score'].max()
-    z_score_mean_d = dist_df_2h['z_score'].mean()
-    z_score_median_d = dist_df_2h['z_score'].median()
+    dist_df_5m = dist_df.tail(12 * 5)
 
-    if (z_score_min_d > 0 and z_score_max_d > 0) or (z_score_min_d < 0 and z_score_max_d < 0):
-        z_score_max_dist_d = abs(z_score_max_d) - abs(z_score_min_d)
-    else:
-        z_score_max_dist_d = abs(z_score_max_d) + abs(z_score_min_d)
+    # Волатильность лог-спреда за последние {hours_back} часов и 5 минут
+    spr_std_hb = dist_df['spread'].std()
+    spr_std_5m = dist_df_5m['spread'].std()
 
-    z_score_dist_to_target_d = abs(z_score_curr_d) + thresh_out
-    z_score_dist_from_max_d = abs(z_score_max_d) - abs(z_score_curr_d)
-    z_score_dist_from_mean_d = abs(z_score_mean_d) - abs(z_score_curr_d)
-    z_score_dist_from_median_d = abs(z_score_median_d) - abs(z_score_curr_d)
-
-    z_score_5m_change_d = -(z_score_curr_d / z_score_5m_d - 1) # Минус для того, чтобы изменения в сторону среднего были положительными
-    z_score_2h_change_d = -(z_score_curr_d / z_score_2h_d - 1)
+    dist_z_curr = dist_df['z_score'][-1]
+    dist_z_5m = dist_df_5m['z_score'][0]
+    dist_z_5m_change = abs(dist_z_5m / dist_z_curr - 1)
+    dist_z_5m_dist = abs(dist_z_5m - dist_z_curr)
 
     # ----- Характеристики логарифмического спреда -----
-    spr_curr = tick_hist['log_spread'][-1]
-    spr_max = tick_hist['log_spread'].max()
-    spr_min = tick_hist['log_spread'].min()
-    spr_median = tick_hist['log_spread'].median()
+    spr_curr = dist_df['spread'][-1]
+    spr_mean = dist_df['spread'].mean()
+    spr_median = dist_df['spread'].median()
 
-    if (spr_min > 0 and spr_max > 0) or (spr_min < 0 and spr_max < 0):
-        spr_max_dist = abs(spr_max) - abs(spr_min)
+    if side_1 == 'long':
+        spr_far = dist_df['spread'].min()
+        spr_close = dist_df['spread'].max()
+        far_idx_d = dist_df['spread'].arg_min()
+    elif side_1 == 'short':
+        spr_far = dist_df['spread'].max()
+        spr_close = dist_df['spread'].min()
+        far_idx_d = dist_df['spread'].arg_max()
+
+    # Максимальный разброс спреда
+    if (spr_close > 0 and spr_far > 0) or (spr_close < 0 and spr_far < 0):
+        spr_max_range = abs(spr_far - spr_close)
     else:
-        spr_max_dist = abs(spr_max) + abs(spr_min)
+        spr_max_range = abs(spr_far) + abs(spr_close)
 
-    spr_dist_to_mean = abs(spr_mean_wind) - abs(spr_curr)
-    spr_dist_from_max = abs(spr_max) - abs(spr_curr)
+    # Расстояние от текущего значения до среднего
+    if (spr_curr > 0 and spr_far > 0) or (spr_curr < 0 and spr_far < 0):
+        spr_dist_to_mean = abs(spr_mean_wind - spr_curr)
+    else:
+        spr_dist_to_mean = abs(spr_mean_wind) + abs(spr_curr)
+
+    # Расстояние от максимума до текущего значения
+    if (spr_curr > 0 and spr_far > 0) or (spr_curr < 0 and spr_far < 0):
+        spr_dist_from_max = abs(spr_far - spr_curr)
+    else:
+        spr_dist_from_max = abs(spr_far) + abs(spr_curr)
+
+    # Датафрейм с отрезком движения z_score от максимального удаления к моменту входа в позицию
+    upswing_df_dist = dist_df[far_idx_d :]
+
+    # Датафрейм с отрезком движения до точки максимального удаления от нулевого z_score
+    if side_1 == 'long':
+        close_idx_d = dist_df[:far_idx_d]['spread'].arg_max()
+    elif side_1 == 'short':
+        close_idx_d = dist_df[:far_idx_d]['spread'].arg_min()
+
+    downswing_df_dist = dist_df[close_idx_d : far_idx_d]
+
+    pos_profit_move_d = upswing_df_dist['profit'][-1] - upswing_df_dist['profit'][0]
+    pos_spread_move_d = upswing_df_dist['spread'][-1] - upswing_df_dist['spread'][0]
+    pos_z_move_d = upswing_df_dist['z_score'][-1] - upswing_df_dist['z_score'][0]
+
+    neg_profit_move_d = downswing_df_dist['profit'][-1] - downswing_df_dist['profit'][0]
+    neg_spread_move_d = downswing_df_dist['spread'][-1] - downswing_df_dist['spread'][0]
+    neg_z_move_d = downswing_df_dist['z_score'][-1] - downswing_df_dist['z_score'][0]
+
+    if side_1 == 'short':
+        pos_spread_move_d = abs(pos_spread_move_d)
+        pos_z_move_d = abs(pos_z_move_d)
+        neg_spread_move_d = -neg_spread_move_d
+        neg_z_move_d = -neg_z_move_d
+
+    # Потенциальный профит при движении до среднего значения спреда
+    potential_profit_spr_d = pos_profit_move_d / pos_spread_move_d * abs(spr_dist_to_mean)
+
+    # Чувствительность
+    pos_sens_d = pos_profit_move_d / pos_spread_move_d
+    neg_sens_d = neg_profit_move_d / neg_spread_move_d
+    pos_sens_z_d = pos_profit_move_d / pos_z_move_d
+    neg_sens_z_d = neg_profit_move_d / neg_z_move_d
+
+    # ----- Разница в показаниях между LinReg и дистанционным методом -----
+    lr_dist_z_mean = (lr_z_curr + dist_z_curr) / 2
+    lr_dist_sign = lr_z_curr * dist_z_curr > 0
 
 
     return {
-        # ----- Характеристики спреда -----
-        'spr_curr': spr_curr,
-        'spr_min': spr_min,
-        'spr_max': spr_max,
-        'spr_median': spr_median,
-        'spr_mean': spr_mean_wind,    # Среднее значение спреда за последние wind часов
-        'spr_max_dist': spr_max_dist,
-        'spr_dist_to_mean': spr_dist_to_mean,
-        'spr_dist_from_max': spr_dist_from_max,
-        'spr_std_2h': spr_std_2h,
-        'spr_std_5m': spr_std_5m,
-
         # ----- Характеристики волатильности -----
         'euc_distance': distance,          # Евклидово расстояние между активами
         'long_std_wind': long_std_wind,    # Стандартное отклонение спреда за последние wind часов
         'short_std_wind': short_std_wind,
-        'long_std_2h': long_std_2,
-        'short_std_2h': short_std_2,
+        'long_std_hb': long_std_hb,
+        'short_std_hb': short_std_hb,
         'long_std_5m': long_std_5m,
         'short_std_5m': short_std_5m,
-        'mean_2h': mean_2h,                # Среднее значение спреда за последние 2 часа
-        'mean_diff': mean_diff,            # Изменение среднего значения между 2 часами и wind часами в %
+
+        # ----- Характеристики LinReg спреда за {hours_back} часов -----
+        'lr_spr_curr': lr_spr_curr,
+        'lr_spr_mean': lr_spr_mean,
+        'lr_spr_median': lr_spr_median,
+        'lr_spr_far': lr_spr_far,
+        'lr_spr_close': lr_spr_close,
+        'lr_spr_max_range': lr_spr_max_range,
+        'lr_spr_curr_dist_from_max': lr_spr_curr_dist_from_max,
+        'lr_spr_std_hb': lr_spr_std_hb,
+        'lr_spr_std_5m': lr_spr_std_5m,
+
+        # ----- Характеристики лог-спреда за {hours_back} часов -----
+        'spr_curr': spr_curr,
+        'spr_mean': spr_mean,
+        'spr_median': spr_median,
+        'spr_far': spr_far,
+        'spr_close': spr_close,
+        'spr_max_range': spr_max_range,
+        'spr_curr_dist_to_mean': spr_dist_to_mean,
+        'spr_dist_from_max': spr_dist_from_max,
+        'spr_std_hb': spr_std_hb,
+        'spr_std_5m': spr_std_5m,
+
+        # ----- Характеристики лог-спреда -----
+        'spr_mean_wind': spr_mean_wind,      # Среднее значение спреда за последние wind часов
+        'spr_mean_diff': spr_mean_diff, # Изменение среднего значения между 2 часами и wind часами в %
+
+        # ----- Коэффициент хеджирования -----
         'tls_beta_wind': tls_beta_wind,
-        'tls_beta_2h': tls_beta_2,
+        'tls_beta_hb': tls_beta_hb,
         'beta_wind': beta_wind,
-        'beta_2h': beta_2h,
-        'hurst_wind': H_wind,              # Показатель Хёрста за wind часов
+        'beta_hb': beta_hb,
+
+        # ----- Характеристики движения спреда -----
+        'hurst_wind': H_wind,         # Показатель Хёрста за wind часов
         'spread_rsi': spread_rsi_1h,
-        'rsi_long': rsi_long_1h,        # Индикатор RSI на агрегированном по 1 часу цене long-токена
+        'rsi_long': rsi_long_1h,      # Индикатор RSI на агрегированном по 1 часу цене long-токена
         'rsi_short': rsi_short_1h,
+        'trend_wind': trend_wind,         # Отношение конца регрессионной прямой к началу за wind часов
+        'trend_hb': trend_hb,
+        'half_life_log_spread': half_life_log_spread,
+        'half_life_lr_spread': half_life_lr_spread,
 
         # ----- Корреляция -----
         'profit_z_corr': pr_z_corr,        # Корреляция между профитом и z_score за последние 2 часа перед входом в позу
         'profit_fz_corr': pr_fz_corr,      # Корреляция между профитом и fixed_z_score
         'z_fz_corr': z_fz_corr,            # Корреляция между z_score и fixed_z_score
         'corr_wind': corr_wind,
-        'corr_2h': corr_2h,
+        'corr_hb': corr_hb,
         'corr_5m': corr_5m,
 
-        'pr_z_change': pr_z_change,       # Изменение профита на единицу изменения z_score за последние 2 часа (среднее)
-        'pr_fz_change': pr_fz_change,     # Изменение профита на единицу изменения fixed_z_score за последние 2 часа (среднее)
-        'profit_sens_fav': sens_favor,    # Только такие изменения z_score, которые улучшают z_score
-        'profit_sens_adv': sens_adv,      # Только такие изменения z_score, которые ухудшают z_score
-        'trend_wind': trend_wind,         # Отношение конца регрессионной прямой к началу за wind часов
-        'trend_2h': trend_2h,
-        'half_life_log_spread': half_life_log_spread,
+        # ----- Чуствительность движения профита к движению z_score LinReg -----
+        'pos_profit_move': pos_profit_move,
+        'pos_spread_move': pos_spread_move,
+        'pos_z_move': pos_z_move,
+        'neg_profit_move': neg_profit_move,
+        'neg_spread_move': neg_spread_move,
+        'neg_z_move': neg_z_move,
+        'pos_sens': pos_sens,
+        'neg_sens': neg_sens,
+        'pos_sens_z': pos_sens_z,
+        'neg_sens_z': neg_sens_z,
+
+        # ----- Чуствительность движения профита к движению z_score log -----
+        'pos_profit_move_d': pos_profit_move_d,
+        'pos_spread_move_d': pos_spread_move_d,
+        'pos_z_move_d': pos_z_move_d,
+        'neg_profit_move_d': neg_profit_move_d,
+        'neg_spread_move_d': neg_spread_move_d,
+        'neg_z_move_d': neg_z_move_d,
+        'pos_sens_d': pos_sens_d,
+        'neg_sens_d': neg_sens_d,
+        'pos_sens_z_d': pos_sens_z_d,
+        'neg_sens_z_d': neg_sens_z_d,
+
+        # ----- Потенциальный доход и убыток -----
+        'potential_profit': potential_profit,
+        'potential_profit_spr': potential_profit_spr,
+        'potential_loss': potential_loss,
+        'profit_loss_ratio': profit_loss_ratio,
+        'potential_profit_spr_d': potential_profit_spr_d,
+
 
         # ----- Характеристики объёмов покупок и продаж -----
         'ask_usdt_mean_wind': ask_usdt_mean_wind, # Торговый объём в usdt (ask) за последние {wind} часов
         'bid_usdt_mean_wind': bid_usdt_mean_wind, # Торговый объём в usdt (bid) за последние {wind} часов
         'bid_ask_ratio_wind': bid_ask_ratio_wind,
-        'ask_usdt_mean_2h': ask_usdt_mean_2h,
-        'bid_usdt_mean_2h': bid_usdt_mean_2h,
-        'bid_ask_ratio_2h': bid_ask_ratio_2h,
+        'ask_usdt_mean_hb': ask_usdt_mean_hb,
+        'bid_usdt_mean_hb': bid_usdt_mean_hb,
+        'bid_ask_ratio_hb': bid_ask_ratio_hb,
         'ask_usdt_mean_5m': ask_usdt_mean_5m,
         'bid_usdt_mean_5m': bid_usdt_mean_5m,
         'bid_ask_ratio_5m': bid_ask_ratio_5m,
-        'ask_5m_2h_ratio': ask_5m_2h_ratio,
-        'bid_5m_2h_ratio': bid_5m_2h_ratio,
+        'ask_5m_hb_ratio': ask_5m_hb_ratio,
+        'bid_5m_hb_ratio': bid_5m_hb_ratio,
         'ask_5m_wind_ratio': ask_5m_wind_ratio,
         'bid_5m_wind_ratio': bid_5m_wind_ratio,
-        'ask_2h_wind_ratio': ask_2h_wind_ratio,
-        'bid_2h_wind_ratio': bid_2h_wind_ratio,
-        'z_score_curr': z_score_curr,
-        'z_score_5m': z_score_5m,
-        'z_score_2h': z_score_2h,
-        'z_score_min': z_score_min,
-        'z_score_max': z_score_max,
-        'z_score_mean': z_score_mean,
-        'z_score_median': z_score_median,
-        'z_score_max_dist': z_score_max_dist,
-        'z_score_dist_to_target': z_score_dist_to_target,
-        'z_score_dist_from_max': z_score_dist_from_max,
-        'z_score_dist_from_mean': z_score_dist_from_mean,
-        'z_score_dist_from_median': z_score_dist_from_median,
+        'ask_hb_wind_ratio': ask_hb_wind_ratio,
+        'bid_hb_wind_ratio': bid_hb_wind_ratio,
+
+        # ----- Характеристики изменения z_score -----
         'z_score_5m_change': z_score_5m_change,
-        'z_score_2h_change': z_score_2h_change,
-
-        'z_score_curr_d': z_score_curr_d,
-        'z_score_5m_d': z_score_5m_d,
-        'z_score_2h_d': z_score_2h_d,
-        'z_score_min_d': z_score_min_d,
-        'z_score_max_d': z_score_max_d,
-        'z_score_mean_d': z_score_mean_d,
-        'z_score_median_d': z_score_median_d,
-        'z_score_max_dist_d': z_score_max_dist_d,
-        'z_score_dist_to_target_d': z_score_dist_to_target_d,
-        'z_score_dist_from_max_d': z_score_dist_from_max_d,
-        'z_score_dist_from_mean_d': z_score_dist_from_mean_d,
-        'z_score_dist_from_median_d': z_score_dist_from_median_d,
-        'z_score_5m_change_d': z_score_5m_change_d,
-        'z_score_2h_change_d': z_score_2h_change_d,
-
-
+        'z_score_5m_dist': z_score_5m_dist,
+        'z_score_5m_change_d': dist_z_5m_change,
+        'z_score_5m_dist_d': dist_z_5m_dist,
+        'lr_dist_z_mean': lr_dist_z_mean,
+        'lr_dist_sign': lr_dist_sign
     }

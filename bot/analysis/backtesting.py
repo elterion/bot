@@ -33,7 +33,19 @@ except Exception:
     # Если IPython не установлен — значит точно CLI
     from tqdm import tqdm
 
+@njit(fastmath=True, cache=True)
+def calculate_profit(open_price, close_price, n_coins, side, fee_rate=0.001):
+    usdt_open = n_coins * open_price
+    open_fee = usdt_open * fee_rate
 
+    usdt_close = n_coins * close_price
+    close_fee = usdt_close * fee_rate
+
+    if side == 1:
+        profit = usdt_close - usdt_open - open_fee - close_fee
+    elif side == 2:
+        profit = usdt_open - usdt_close - open_fee - close_fee
+    return profit
 
 @njit("float64(float64, float64)", fastmath=True, cache=True)
 def _round(value, dp):
@@ -44,7 +56,7 @@ def backtest_fast(time_arr, z_score, currspr_arr, spread_arr, std_arr, bid_1, as
             dp_1, dp_2, thresh_low_in, thresh_low_out,
             thresh_high_in, thresh_high_out, long_possible, short_possible,
             dist_in, dist_out, balance, order_size, qty_method, std_1, std_2,
-            fee_rate,  sl_std, sl_dist, sl_method, sl_seconds=0,
+            fee_rate,  sl_std, sl_dist, sl_loss, sl_method, sl_seconds=0,
             open_method=0, close_method=0, leverage=1, force_close=0):
 
     n = z_score.shape[0]
@@ -57,6 +69,8 @@ def backtest_fast(time_arr, z_score, currspr_arr, spread_arr, std_arr, bid_1, as
     open_time = 0
     open_price_1 = 0.0
     open_price_2 = 0.0
+    price_1 = 0.0
+    price_2 = 0.0
     qty_1 = 0.0
     qty_2 = 0.0
 
@@ -71,6 +85,7 @@ def backtest_fast(time_arr, z_score, currspr_arr, spread_arr, std_arr, bid_1, as
     fixed_mean = 0.0
     fixed_std = 0.0
     fixed_z_score = 0.0
+    curr_profit = 0.0
 
     out = NumbaList()
     events = NumbaList()
@@ -155,8 +170,11 @@ def backtest_fast(time_arr, z_score, currspr_arr, spread_arr, std_arr, bid_1, as
                 open_time = 0
                 open_price_1 = 0.0
                 open_price_2 = 0.0
+                price_1 = 0.0
+                price_2 = 0.0
                 qty_1 = 0.0
                 qty_2 = 0.0
+                curr_profit = 0.0
                 liq_status = LIQ_NONE
 
         # --- Открываем ордер, если есть команда на открытие ---
@@ -266,10 +284,13 @@ def backtest_fast(time_arr, z_score, currspr_arr, spread_arr, std_arr, bid_1, as
             open_time = 0
             open_price_1 = 0.0
             open_price_2 = 0.0
+            price_1 = 0.0
+            price_2 = 0.0
             qty_1 = 0.0
             qty_2 = 0.0
             fixed_mean = 0.0
             fixed_std = 0.0
+            curr_profit = 0.0
 
         # --- Проверяем действующий стоп-лосс счётчик ---
         if sl_counter > 0:
@@ -349,17 +370,29 @@ def backtest_fast(time_arr, z_score, currspr_arr, spread_arr, std_arr, bid_1, as
 
         # --- Обрабатываем открытую позицию ---
         if pos_side == POS_LONG or pos_side == POS_SHORT:
-            avg_1 = (bid_1[i] + ask_1[i]) / 2.0
-            avg_2 = (bid_2[i] + ask_2[i]) / 2.0
             fixed_z_score = (currspr_arr[i] - fixed_mean) / fixed_std
 
+            if pos_side == POS_LONG:
+                price_1 = bid_1[i]
+                price_2 = ask_2[i]
+            else:
+                price_1 = ask_1[i]
+                price_2 = bid_2[i]
+
+            rev_pos_side = POS_SHORT if pos_side == POS_LONG else POS_LONG
+            cp_1 = calculate_profit(open_price_1, price_1, qty_1, pos_side, fee_rate)
+            cp_2 = calculate_profit(open_price_2, price_2, qty_2, rev_pos_side, fee_rate)
+            curr_profit = cp_1 + cp_2
+
             # --- Проверяем стоп-лосс ---
-            if abs(fixed_z_score) > sl_std and pos_side == POS_SHORT:
+            if pos_side == POS_SHORT and (abs(fixed_z_score) > sl_std or
+                                          curr_profit < -sl_loss * balance):
                 signal = SIG_SHORT_CLOSE
                 reason = REASON_STOPLOSS
                 if sl_method == 2:
                     sl_block_short = 1
-            elif abs(fixed_z_score) > sl_std and pos_side == POS_LONG:
+            elif pos_side == POS_LONG and (abs(fixed_z_score) > sl_std or
+                                           curr_profit < -sl_loss * balance):
                 signal = SIG_LONG_CLOSE
                 reason = REASON_STOPLOSS
                 if sl_method == 2:
@@ -423,13 +456,12 @@ def backtest_fast(time_arr, z_score, currspr_arr, spread_arr, std_arr, bid_1, as
 def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
             thresh_high_in, thresh_high_out, long_possible, short_possible,
             balance, order_size, qty_method, std_1, std_2,
-            fee_rate,  sl_std, sl_dist, sl_method=None, sl_seconds=0,
+            fee_rate,  sl_std, sl_dist, sl_loss=0.1, sl_method=None, sl_seconds=0,
             open_method='direct', close_method='direct', leverage=1, dist_in=0, dist_out=0,
             force_close=False, verbose=False):
     """
 
 
-    close_method: Как закрывать позицию. direct - по обычному z_score, fix - по фиксированному
     """
 
     time_arr = df['ts'].to_numpy()
@@ -463,7 +495,8 @@ def backtest(df, token_1, token_2, dp_1, dp_2, thresh_low_in, thresh_low_out,
             dist_in=dist_in, dist_out=dist_out,
             balance=balance, order_size=order_size, qty_method=qty_map[qty_method],
             std_1=std_1, std_2=std_2, fee_rate=fee_rate,
-            sl_std=sl_std, sl_dist=sl_dist, sl_method=sl_map[sl_method], sl_seconds=sl_seconds,
+            sl_std=sl_std, sl_dist=sl_dist, sl_loss=sl_loss, sl_method=sl_map[sl_method],
+            sl_seconds=sl_seconds,
             open_method=open_map[open_method], close_method=close_map[close_method],
             leverage=leverage, force_close=force_close)
 

@@ -356,7 +356,6 @@ def calculate_z_score(start_ts: int,
         min_order: размер минимального ордера в usdt для фильтрации слишком малого объёма
 
     """
-    step = tss[1] - tss[0]
     nrows = tss.shape[0]
     n_winds = winds.shape[0]
     ts_arr = np.full(nrows, np.nan)
@@ -367,7 +366,7 @@ def calculate_z_score(start_ts: int,
 
     for i in range(nrows):
         # Пропускаем начало датафрейма, нужное для вычисления медианы
-        if tss[i] <= start_ts + median_length * step:
+        if i < median_length:
             continue
 
         t1_price = price1[i - median_length: i]
@@ -404,8 +403,6 @@ def create_zscore_df(token_1, token_2, sec_df, agg_df, tf, winds, start_ts, medi
         spr_method = 0
     elif spr_method == 'dist':
         spr_method = 1
-    elif spr_method == 'tls':
-        spr_method = 2
 
     # --- Перевод polars в numpy ---
     tss = sec_df['ts'].to_numpy()
@@ -629,10 +626,20 @@ def load_data(token_1, token_2, valid_time, end_time, tf, wind, db_manager):
         train_length = int(tf[0]) * wind * 2 + 1
         start_time = valid_time - timedelta(hours=train_length)
 
-        df_1 = db_manager.get_tick_ob(token=token_1 + '_USDT',
+        t1_name = token_1 + '_USDT'
+        t2_name = token_2 + '_USDT'
+
+        token_1_first_date = db_manager.get_oldest_date_in_orderbook(t1_name)
+        token_2_first_date = db_manager.get_oldest_date_in_orderbook(t2_name)
+
+        if token_1_first_date > start_time or token_2_first_date > start_time:
+            print(f'Для пары {token_1} - {token_2} не хватает тренировочной выборки.')
+            return pl.DataFrame(), pl.DataFrame()
+
+        df_1 = db_manager.get_tick_ob(token=t1_name,
                                          start_time=valid_time,
                                          end_time=end_time)
-        df_2 = db_manager.get_tick_ob(token=token_2 + '_USDT',
+        df_2 = db_manager.get_tick_ob(token=t2_name,
                                          start_time=valid_time,
                                          end_time=end_time)
         tick_df = make_df_from_orderbooks(df_1, df_2, token_1, token_2, start_time=valid_time)
@@ -741,76 +748,6 @@ def get_intersections(df: pl.DataFrame, threshold: float = 0.2) -> int:
 
     return crossing_count
 
-def get_sensitivity(df, side_1):
-    first_z_score, last_z_score = df['z_score'][0], df['z_score'][-1]
-    first_profit, last_profit = df['profit'][0], df['profit'][-1]
-    first_fz, last_fz = df['fixed_z_score'][0], df['fixed_z_score'][-1]
-
-    pr_z_change = (last_profit - first_profit) / (last_z_score - first_z_score)
-    pr_fz_change = (last_profit - first_profit) / (last_fz - first_fz)
-
-    if side_1 == 'short':
-        if last_z_score > first_z_score and last_profit < first_profit:
-            pr_z_change = abs(pr_z_change)
-        elif last_z_score > first_z_score and last_profit > first_profit:
-            pr_z_change = -abs(pr_z_change)
-        elif last_z_score < first_z_score and last_profit > first_profit:
-            pr_z_change = abs(pr_z_change)
-        elif last_z_score < first_z_score and last_profit < first_profit:
-            pr_z_change = -abs(pr_z_change)
-
-        if last_fz > first_fz and last_profit < first_profit:
-            pr_fz_change = abs(pr_fz_change)
-        elif last_fz > first_fz and last_profit > first_profit:
-            pr_fz_change = -abs(pr_fz_change)
-        elif last_fz < first_fz and last_profit > first_profit:
-            pr_fz_change = abs(pr_fz_change)
-        elif last_fz < first_fz and last_profit < first_profit:
-            pr_fz_change = -abs(pr_fz_change)
-    elif side_1 == 'long':
-        if last_z_score > first_z_score and last_profit > first_profit:
-            pr_z_change = abs(pr_z_change)
-        elif last_z_score > first_z_score and last_profit < first_profit:
-            pr_z_change = -abs(pr_z_change)
-        elif last_z_score < first_z_score and last_profit < first_profit:
-            pr_z_change = abs(pr_z_change)
-        elif last_z_score < first_z_score and last_profit > first_profit:
-            pr_z_change = -abs(pr_z_change)
-
-        if last_fz > first_fz and last_profit > first_profit:
-            pr_fz_change = abs(pr_fz_change)
-        elif last_fz > first_fz and last_profit < first_profit:
-            pr_fz_change = -abs(pr_fz_change)
-        elif last_fz < first_fz and last_profit < first_profit:
-            pr_fz_change = abs(pr_fz_change)
-        elif last_fz < first_fz and last_profit > first_profit:
-            pr_fz_change = -abs(pr_fz_change)
-
-    return pr_z_change, pr_fz_change
-
-def get_relative_sensitivity(df, side_1):
-    dz_dpr_df = df.with_columns(
-        pl.col("z_score").diff().alias("delta_z"),
-        pl.col("profit").diff().alias("delta_profit")
-    )[1:].filter(
-        pl.col("delta_z").is_not_null() &
-        (pl.col("delta_z").abs() > 1e-4)
-    )
-
-    is_favorable_move = pl.col("delta_z") > 0
-    if side_1 == 'short': # short
-        dz_dpr_df = dz_dpr_df.with_columns(-pl.col('delta_z').alias('delta_z'))
-
-    dz_dpr_df = dz_dpr_df.drop('fixed_z_score').with_columns([
-        (pl.col("delta_profit") / pl.col("delta_z")).filter(is_favorable_move).mean().alias("sens_favor"),
-        (pl.col("delta_profit") / pl.col("delta_z")).filter(~is_favorable_move).mean().alias("sens_adv"),
-    ])
-
-    sens_favor = dz_dpr_df['sens_favor'][-1]
-    sens_adv = dz_dpr_df['sens_adv'][-1]
-
-    return sens_favor, sens_adv
-
 def min_max_normalize(prices):
     """Нормировка цен в диапазон [0, 1]"""
     return (prices - np.min(prices)) / (np.max(prices) - np.min(prices))
@@ -835,13 +772,46 @@ def calculate_lr_on_dataset(df, token_1, token_2):
     spread = y - (alpha + beta * x)
 
     # Статистики спреда
-    # mean_spread = np.mean(spread)
-    # std_spread = np.std(spread, ddof=1)  # несмещенная оценка
+    mean_spread = np.mean(spread)
+    std_spread = np.std(spread, ddof=1)  # несмещенная оценка
+
+    # Рассчитываем z-score: (spread - mean_spread) / std_spread
+    z_score = (spread - mean_spread) / std_spread
 
     # Добавляем спред в датафрейм
-    result_df = df.with_columns(pl.Series('spread', spread))
+    result_df = df.with_columns([
+            pl.Series('spread', spread),
+            pl.Series('z_score', z_score)
+        ])
 
     return result_df
+
+def calculate_rolling_sensitivity(df, window_size):
+    """
+    Вычисляет скользящую sensitivity через линейную регрессию
+    """
+    sensitivities = []
+
+    for i in range(len(df) - window_size):
+        window_df = df[i:i+window_size]
+
+        # Простая линейная регрессия: profit = a + b * z_score
+        z_values = window_df['z_score'].to_numpy()
+        p_values = window_df['profit'].to_numpy()
+
+        # Вычисляем наклон (slope) - это и есть sensitivity
+        z_mean = z_values.mean()
+        p_mean = p_values.mean()
+
+        numerator = ((z_values - z_mean) * (p_values - p_mean)).sum()
+        denominator = ((z_values - z_mean) ** 2).sum()
+
+        if denominator > 1e-6:
+            slope = numerator / denominator
+            sensitivities.append(slope)
+
+    return np.array(sensitivities)
+
 
 def get_open_time_stats(token_1: str,
                         token_2: str,
@@ -944,6 +914,11 @@ def get_open_time_stats(token_1: str,
             ((pl.col('spread') - lr_fixed_mean) / lr_fixed_std).alias('fixed_z_score')
         )
 
+    lr_df = lr_df.with_columns(
+            pl.col("z_score").diff().alias("delta_z"),
+            pl.col("profit").diff().alias("delta_profit")
+        )[1:]
+
     # Характеристики спреда, посчитанного с помощью LinReg
     lr_spr_curr = lr_df['spread'][-1]
     lr_spr_mean = lr_df['spread'].mean()
@@ -953,67 +928,52 @@ def get_open_time_stats(token_1: str,
         lr_spr_far = lr_df['spread'].min()
         lr_spr_close = lr_df['spread'].max()
         far_idx = lr_df['spread'].arg_min()
+
+        upswing_df = lr_df.filter(pl.col('delta_z') > 1e-6)
+        downswing_df = lr_df.filter(pl.col('delta_z') < -1e-6)
     elif side_1 == 'short':
         lr_spr_far = lr_df['spread'].max()
         lr_spr_close = lr_df['spread'].min()
         far_idx = lr_df['spread'].arg_max()
 
-    # Датафрейм с отрезком движения z_score от максимального удаления к моменту входа в позицию
-    upswing_df = lr_df[far_idx :]
+        upswing_df = lr_df.filter(pl.col('delta_z') < -1e-6)
+        downswing_df = lr_df.filter(pl.col('delta_z') > 1e-6)
 
-    # Датафрейм с отрезком движения до точки максимального удаления от нулевого z_score
-    if side_1 == 'long':
-        close_idx = lr_df[:far_idx]['spread'].arg_max()
-    elif side_1 == 'short':
-        close_idx = lr_df[:far_idx]['spread'].arg_min()
+    time_from_max = lr_df.height - far_idx
 
-    downswing_df = lr_df[close_idx : far_idx]
+    pos_sens_arr = calculate_rolling_sensitivity(upswing_df, 120)
+    neg_sens_arr = calculate_rolling_sensitivity(downswing_df, 120)
 
-    # Потенциальный профит и убыток
-    pos_profit_move = upswing_df['profit'][-1] - upswing_df['profit'][0]
-    pos_spread_move = upswing_df['spread'][-1] - upswing_df['spread'][0]
-    pos_z_move = upswing_df['z_score'][-1] - upswing_df['z_score'][0]
-
-    neg_profit_move = downswing_df['profit'][-1] - downswing_df['profit'][0]
-    neg_spread_move = downswing_df['spread'][-1] - downswing_df['spread'][0]
-    neg_z_move = downswing_df['z_score'][-1] - downswing_df['z_score'][0]
+    if side_1 == 'short':
+        pos_sens_arr = -pos_sens_arr
+        neg_sens_arr = -neg_sens_arr
 
     # Движение профита на единицу движения спреда и z_score
-    pos_sens = pos_profit_move / pos_spread_move
-    neg_sens = neg_profit_move / neg_spread_move
-    pos_sens_z = pos_profit_move / pos_z_move
-    neg_sens_z = neg_profit_move / neg_z_move
+    pos_sens_max = pos_sens_arr.max()
+    pos_sens_mean = pos_sens_arr.mean()
+    pos_sens_min = pos_sens_arr.min()
 
-    sens_ratio = pos_sens / neg_sens - 1
-    sens_ratio_z = pos_sens_z / neg_sens_z - 1
+    neg_sens_max = neg_sens_arr.max()
+    neg_sens_mean = neg_sens_arr.mean()
+    neg_sens_min = neg_sens_arr.min()
 
-    if side_1 == 'long':
-        assert pos_profit_move > 0
-        assert pos_spread_move > 0
-        assert pos_z_move > 0
-        assert neg_profit_move < 0
-        assert neg_spread_move < 0
-        assert neg_z_move < 0
-    elif side_1 == 'short':
-        assert pos_profit_move > 0
-        assert pos_spread_move < 0
-        assert pos_z_move < 0
-        assert neg_profit_move < 0
-        assert neg_spread_move > 0
-        assert neg_z_move > 0
+    sens_ratio = pos_sens_mean / neg_sens_mean - 1
 
-        pos_spread_move = abs(pos_spread_move)
-        pos_z_move = abs(pos_z_move)
-        neg_spread_move = -neg_spread_move
-        neg_z_move = -neg_z_move
-
+    # Потенциальный профит и убыток
     pos_distance = thresh_in + thresh_out
     neg_distance = sl_spread_std - thresh_in
 
-    potential_profit = pos_profit_move / pos_z_move * pos_distance
-    potential_profit_spr = pos_profit_move / pos_spread_move * abs(lr_spr_curr)
-    potential_loss = -neg_profit_move / neg_z_move * neg_distance
-    profit_loss_ratio = potential_profit / potential_loss
+    potential_profit_mean = pos_sens_mean * pos_distance
+    potential_profit_max = pos_sens_max * pos_distance
+    potential_profit_min = pos_sens_min * pos_distance
+
+    potential_loss_mean = -neg_sens_mean * neg_distance
+    potential_loss_max = -neg_sens_max * neg_distance
+    potential_loss_min = -neg_sens_min * neg_distance
+
+    pl_ratio_mean = abs(potential_profit_mean / potential_loss_mean)
+    pl_ratio_worst = abs(potential_profit_min / potential_loss_max)
+    pl_ratio_best = abs(potential_profit_max / potential_loss_min)
 
     # Максимальный разброс спреда
     if (lr_spr_close > 0 and lr_spr_far > 0) or (lr_spr_close < 0 and lr_spr_far < 0):
@@ -1078,7 +1038,26 @@ def get_open_time_stats(token_1: str,
     trend_hb = (y_end_hb - b_hb) / b_hb * 100
 
     # ----- Расчёт коэффициента хеджирования beta с помощью LinReg -----
-    log_df_wind = tick_df.with_columns([
+    log_df_hb = tick_df.with_columns([
+            pl.col(token_1).log().alias(token_1),
+            pl.col(token_2).log().alias(token_2)
+        ]).drop_nulls().tail(hours_back * 12 * 60)
+
+    x = log_df_hb[token_2].to_numpy()
+    y = log_df_hb[token_1].to_numpy()
+    beta_hb = np.cov(x, y)[0, 1] / np.var(x)
+
+    # ----- Расчёт half-life и пересечений с нулём ------
+    half_life_log_spread = calculate_half_life(tick_spread_wind) / 12 / 60
+
+    lr_whole_time_df = calculate_lr_on_dataset(agg_df, token_1, token_2)
+    lr_spread = lr_whole_time_df['spread'].to_numpy()
+    half_life_lr_spread = calculate_half_life(lr_spread)
+    n_intersections = get_intersections(lr_whole_time_df, threshold=0.2)
+    n_intersections_hb = get_intersections(lr_df, threshold=0.2)
+
+    # ----- Расчёт beta с помощью LinReg на всём датафрейме -----
+    log_df_wind = agg_df.with_columns([
         pl.col(token_1).log().alias(token_1),
         pl.col(token_2).log().alias(token_2)
     ]).drop_nulls()
@@ -1087,20 +1066,7 @@ def get_open_time_stats(token_1: str,
     y = log_df_wind[token_1].to_numpy()
     beta_wind = np.cov(x, y)[0, 1] / np.var(x)
 
-    log_df_hb = tick_df.with_columns([
-        pl.col(token_1).log().alias(token_1),
-        pl.col(token_2).log().alias(token_2)
-    ]).drop_nulls().tail(hours_back * 12 * 60)
 
-    x = log_df_hb[token_2].to_numpy()
-    y = log_df_hb[token_1].to_numpy()
-    beta_hb = np.cov(x, y)[0, 1] / np.var(x)
-
-    # ----- Расчёт half-life ------
-    half_life_log_spread = calculate_half_life(tick_spread_wind) / 12 / 60
-
-    lr_spread = calculate_lr_on_dataset(agg_df, token_1, token_2)['spread'].to_numpy()
-    half_life_lr_spread = calculate_half_life(lr_spread)
 
     # ----- Расчёт показателей торгового объёма -----
     # За 2 * {wind} часов
@@ -1146,6 +1112,10 @@ def get_open_time_stats(token_1: str,
                   'spread_mean', f'spread_std_{wind}_{tf}': 'spread_std', f'z_score_{wind}_{tf}': 'z_score'})
     dist_df = calculate_profit_curve(dist_df, token_1, token_2, side_1,
                             t1_op, t2_op, t1_qty, t2_qty, fee_rate=0.001)
+    dist_df = dist_df.with_columns(
+            pl.col("z_score").diff().alias("delta_z"),
+            pl.col("profit").diff().alias("delta_profit")
+        )[1:]
 
     dist_df_5m = dist_df.tail(12 * 5)
 
@@ -1167,10 +1137,48 @@ def get_open_time_stats(token_1: str,
         spr_far = dist_df['spread'].min()
         spr_close = dist_df['spread'].max()
         far_idx_d = dist_df['spread'].arg_min()
+
+        dist_upswing_df = dist_df.filter(pl.col('delta_z') > 1e-6)
+        dist_downswing_df = dist_df.filter(pl.col('delta_z') < -1e-6)
     elif side_1 == 'short':
         spr_far = dist_df['spread'].max()
         spr_close = dist_df['spread'].min()
         far_idx_d = dist_df['spread'].arg_max()
+
+        dist_upswing_df = dist_df.filter(pl.col('delta_z') < -1e-6)
+        dist_downswing_df = dist_df.filter(pl.col('delta_z') > 1e-6)
+
+    time_from_max_dist = dist_df.height - far_idx_d
+
+    dist_pos_sens_arr = calculate_rolling_sensitivity(dist_upswing_df, 120)
+    dist_neg_sens_arr = calculate_rolling_sensitivity(dist_downswing_df, 120)
+
+    # Движение профита на единицу движения спреда и z_score
+    dist_pos_sens_max = dist_pos_sens_arr.max()
+    dist_pos_sens_mean = dist_pos_sens_arr.mean()
+    dist_pos_sens_min = dist_pos_sens_arr.min()
+
+    dist_neg_sens_max = dist_neg_sens_arr.max()
+    dist_neg_sens_mean = dist_neg_sens_arr.mean()
+    dist_neg_sens_min = dist_neg_sens_arr.min()
+
+    dist_sens_ratio = dist_pos_sens_mean / dist_neg_sens_mean - 1
+
+    # Потенциальный профит и убыток
+    pos_distance = thresh_in + thresh_out
+    neg_distance = sl_spread_std - thresh_in
+
+    dist_potential_profit_mean = dist_pos_sens_mean * pos_distance
+    dist_potential_profit_max = dist_pos_sens_max * pos_distance
+    dist_potential_profit_min = dist_pos_sens_min * pos_distance
+
+    dist_potential_loss_mean = -dist_neg_sens_mean * neg_distance
+    dist_potential_loss_max = -dist_neg_sens_max * neg_distance
+    dist_potential_loss_min = -dist_neg_sens_min * neg_distance
+
+    dist_pl_ratio_mean = abs(dist_potential_profit_mean / dist_potential_loss_mean)
+    dist_pl_ratio_worst = abs(dist_potential_profit_min / dist_potential_loss_max)
+    dist_pl_ratio_best = abs(dist_potential_profit_max / dist_potential_loss_min)
 
     # Максимальный разброс спреда
     if (spr_close > 0 and spr_far > 0) or (spr_close < 0 and spr_far < 0):
@@ -1190,44 +1198,9 @@ def get_open_time_stats(token_1: str,
     else:
         spr_dist_from_max = abs(spr_far) + abs(spr_curr)
 
-    # Датафрейм с отрезком движения z_score от максимального удаления к моменту входа в позицию
-    upswing_df_dist = dist_df[far_idx_d :]
-
-    # Датафрейм с отрезком движения до точки максимального удаления от нулевого z_score
-    if side_1 == 'long':
-        close_idx_d = dist_df[:far_idx_d]['spread'].arg_max()
-    elif side_1 == 'short':
-        close_idx_d = dist_df[:far_idx_d]['spread'].arg_min()
-
-    downswing_df_dist = dist_df[close_idx_d : far_idx_d]
-
-    pos_profit_move_d = upswing_df_dist['profit'][-1] - upswing_df_dist['profit'][0]
-    pos_spread_move_d = upswing_df_dist['spread'][-1] - upswing_df_dist['spread'][0]
-    pos_z_move_d = upswing_df_dist['z_score'][-1] - upswing_df_dist['z_score'][0]
-
-    neg_profit_move_d = downswing_df_dist['profit'][-1] - downswing_df_dist['profit'][0]
-    neg_spread_move_d = downswing_df_dist['spread'][-1] - downswing_df_dist['spread'][0]
-    neg_z_move_d = downswing_df_dist['z_score'][-1] - downswing_df_dist['z_score'][0]
-
-    if side_1 == 'short':
-        pos_spread_move_d = abs(pos_spread_move_d)
-        pos_z_move_d = abs(pos_z_move_d)
-        neg_spread_move_d = -neg_spread_move_d
-        neg_z_move_d = -neg_z_move_d
-
-    # Потенциальный профит при движении до среднего значения спреда
-    potential_profit_spr_d = pos_profit_move_d / pos_spread_move_d * abs(spr_dist_to_mean)
-
-    # Чувствительность
-    pos_sens_d = pos_profit_move_d / pos_spread_move_d
-    neg_sens_d = neg_profit_move_d / neg_spread_move_d
-    pos_sens_z_d = pos_profit_move_d / pos_z_move_d
-    neg_sens_z_d = neg_profit_move_d / neg_z_move_d
-
     # ----- Разница в показаниях между LinReg и дистанционным методом -----
     lr_dist_z_mean = (lr_z_curr + dist_z_curr) / 2
     lr_dist_sign = lr_z_curr * dist_z_curr > 0
-
 
     return {
         # ----- Характеристики волатильности -----
@@ -1249,6 +1222,7 @@ def get_open_time_stats(token_1: str,
         'lr_spr_curr_dist_from_max': lr_spr_curr_dist_from_max,
         'lr_spr_std_hb': lr_spr_std_hb,
         'lr_spr_std_5m': lr_spr_std_5m,
+        'time_from_max': time_from_max,
 
         # ----- Характеристики лог-спреда за {hours_back} часов -----
         'spr_curr': spr_curr,
@@ -1261,6 +1235,7 @@ def get_open_time_stats(token_1: str,
         'spr_dist_from_max': spr_dist_from_max,
         'spr_std_hb': spr_std_hb,
         'spr_std_5m': spr_std_5m,
+        'time_from_max_dist': time_from_max_dist,
 
         # ----- Характеристики лог-спреда -----
         'spr_mean_wind': spr_mean_wind,      # Среднее значение спреда за последние wind часов
@@ -1277,10 +1252,12 @@ def get_open_time_stats(token_1: str,
         'spread_rsi': spread_rsi_1h,
         'rsi_long': rsi_long_1h,      # Индикатор RSI на агрегированном по 1 часу цене long-токена
         'rsi_short': rsi_short_1h,
-        'trend_wind': trend_wind,         # Отношение конца регрессионной прямой к началу за wind часов
+        'trend_wind': trend_wind,     # Отношение конца регрессионной прямой к началу за wind часов
         'trend_hb': trend_hb,
         'half_life_log_spread': half_life_log_spread,
         'half_life_lr_spread': half_life_lr_spread,
+        'n_intersections': n_intersections,
+        'n_intersections_hb': n_intersections_hb,
 
         # ----- Корреляция -----
         'profit_z_corr': pr_z_corr,        # Корреляция между профитом и z_score за последние 2 часа перед входом в позу
@@ -1291,35 +1268,43 @@ def get_open_time_stats(token_1: str,
         'corr_5m': corr_5m,
 
         # ----- Чуствительность движения профита к движению z_score LinReg -----
-        'pos_profit_move': pos_profit_move,
-        'pos_spread_move': pos_spread_move,
-        'pos_z_move': pos_z_move,
-        'neg_profit_move': neg_profit_move,
-        'neg_spread_move': neg_spread_move,
-        'neg_z_move': neg_z_move,
-        'pos_sens': pos_sens,
-        'neg_sens': neg_sens,
-        'pos_sens_z': pos_sens_z,
-        'neg_sens_z': neg_sens_z,
+        'pos_sens_max': pos_sens_max,
+        'pos_sens_mean': pos_sens_mean,
+        'pos_sens_min': pos_sens_min,
+        'neg_sens_max': neg_sens_max,
+        'neg_sens_mean': neg_sens_mean,
+        'neg_sens_min': neg_sens_min,
+        'sens_ratio': sens_ratio,
 
         # ----- Чуствительность движения профита к движению z_score log -----
-        'pos_profit_move_d': pos_profit_move_d,
-        'pos_spread_move_d': pos_spread_move_d,
-        'pos_z_move_d': pos_z_move_d,
-        'neg_profit_move_d': neg_profit_move_d,
-        'neg_spread_move_d': neg_spread_move_d,
-        'neg_z_move_d': neg_z_move_d,
-        'pos_sens_d': pos_sens_d,
-        'neg_sens_d': neg_sens_d,
-        'pos_sens_z_d': pos_sens_z_d,
-        'neg_sens_z_d': neg_sens_z_d,
+        'dist_pos_sens_max': dist_pos_sens_max,
+        'dist_pos_sens_mean': dist_pos_sens_mean,
+        'dist_pos_sens_min': dist_pos_sens_min,
+        'dist_neg_sens_max': dist_neg_sens_max,
+        'dist_neg_sens_mean': dist_neg_sens_mean,
+        'dist_neg_sens_min': dist_neg_sens_min,
+        'dist_sens_ratio': dist_sens_ratio,
 
         # ----- Потенциальный доход и убыток -----
-        'potential_profit': potential_profit,
-        'potential_profit_spr': potential_profit_spr,
-        'potential_loss': potential_loss,
-        'profit_loss_ratio': profit_loss_ratio,
-        'potential_profit_spr_d': potential_profit_spr_d,
+        'potential_profit_mean': potential_profit_mean,
+        'potential_profit_max': potential_profit_max,
+        'potential_profit_min': potential_profit_min,
+        'potential_loss_mean': potential_loss_mean,
+        'potential_loss_max': potential_loss_max,
+        'potential_loss_min': potential_loss_min,
+        'pl_ratio_mean': pl_ratio_mean,
+        'pl_ratio_worst': pl_ratio_worst,
+        'pl_ratio_best': pl_ratio_best,
+
+        'dist_potential_profit_mean': dist_potential_profit_mean,
+        'dist_potential_profit_max': dist_potential_profit_max,
+        'dist_potential_profit_min': dist_potential_profit_min,
+        'dist_potential_loss_mean': dist_potential_loss_mean,
+        'dist_potential_loss_max': dist_potential_loss_max,
+        'dist_potential_loss_min': dist_potential_loss_min,
+        'dist_pl_ratio_mean': dist_pl_ratio_mean,
+        'dist_pl_ratio_worst': dist_pl_ratio_worst,
+        'dist_pl_ratio_best': dist_pl_ratio_best,
 
 
         # ----- Характеристики объёмов покупок и продаж -----
@@ -1345,5 +1330,6 @@ def get_open_time_stats(token_1: str,
         'z_score_5m_change_d': dist_z_5m_change,
         'z_score_5m_dist_d': dist_z_5m_dist,
         'lr_dist_z_mean': lr_dist_z_mean,
-        'lr_dist_sign': lr_dist_sign
+        'lr_dist_sign': lr_dist_sign,
+        'dist_z_curr': dist_z_curr
     }

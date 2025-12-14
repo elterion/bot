@@ -593,14 +593,19 @@ def calculate_half_life(spread):
 
     denominator = n_valid * sum_x2 - sum_x**2
     if denominator == 0:
-        return np.inf
+        return 9999
 
     lambda_param = (n_valid * sum_xy - sum_x * sum_y) / denominator
 
     if lambda_param >= 0:
-        return np.inf
+        return 9999
 
     half_life = -np.log(2) / lambda_param
+
+    # Проверка на nan и отрицательные значения
+    if np.isnan(half_life) or half_life < 0:
+        return 9999
+
     return half_life
 
 def lr_coefs(y):
@@ -849,13 +854,15 @@ def get_open_time_stats(token_1: str,
 
     # ----- Собираем статистику за 2*{wind} часов -----
     df_wind = agg_df.with_columns([
-        pl.col(token_1).pct_change().std().alias("vol_1"),
-        pl.col(token_2).pct_change().std().alias("vol_2"),
+        pl.col(token_1).std().alias("vol_1"),
+        pl.col(token_2).std().alias("vol_2"),
         pl.col('log_spread').mean().alias('spread_mean')
     ])
 
     spr_mean_wind = df_wind["spread_mean"][0]
 
+    long_mean_wind = df_wind[token_1].mean() if side_1 == 'long' else df_wind[token_2].mean()
+    short_mean_wind = df_wind[token_2].mean() if side_1 == 'long' else df_wind[token_1].mean()
     long_std_wind = df_wind["vol_1"][0] if side_1 == 'long' else df_wind["vol_2"][0]
     short_std_wind = df_wind["vol_2"][0] if side_1 == 'long' else df_wind["vol_1"][0]
     tls_beta_wind = calculate_tls_beta(df_wind[token_1].to_numpy(),
@@ -866,13 +873,15 @@ def get_open_time_stats(token_1: str,
 
     # ----- Волатильность активов за {hours_back} часов -----
     df_hb = tick_df.with_columns([
-            pl.col(token_1).pct_change().std().alias("vol_1"),
-            pl.col(token_2).pct_change().std().alias("vol_2"),
+            pl.col(token_1).std().alias("vol_1"),
+            pl.col(token_2).std().alias("vol_2"),
             pl.col('log_spread').mean().alias('spread_mean')
     ])
 
     spr_mean_hb = df_hb["spread_mean"][0]
 
+    long_mean_hb = df_hb[token_1].mean() if side_1 == 'long' else df_hb[token_2].mean()
+    short_mean_hb = df_hb[token_2].mean() if side_1 == 'long' else df_hb[token_1].mean()
     long_std_hb = df_hb["vol_1"][0] if side_1 == 'long' else df_hb["vol_2"][0]
     short_std_hb = df_hb["vol_2"][0] if side_1 == 'long' else df_hb["vol_1"][0]
     tls_beta_hb = calculate_tls_beta(df_hb[token_1].to_numpy(), df_hb[token_2].to_numpy())
@@ -884,11 +893,13 @@ def get_open_time_stats(token_1: str,
     df_5m = tick_df.filter(
             pl.col('time') > open_time - timedelta(minutes=5)
         ).with_columns([
-            pl.col(token_1).pct_change().std().alias("vol_1"),
-            pl.col(token_2).pct_change().std().alias("vol_2"),
+            pl.col(token_1).std().alias("vol_1"),
+            pl.col(token_2).std().alias("vol_2"),
             pl.col('log_spread').mean().alias('mean')
     ])
 
+    long_mean_5m = df_5m[token_1].mean() if side_1 == 'long' else df_5m[token_2].mean()
+    short_mean_5m = df_5m[token_2].mean() if side_1 == 'long' else df_5m[token_1].mean()
     long_std_5m = df_5m["vol_1"][0] if side_1 == 'long' else df_5m["vol_2"][0]
     short_std_5m = df_5m["vol_2"][0] if side_1 == 'long' else df_5m["vol_1"][0]
 
@@ -940,7 +951,27 @@ def get_open_time_stats(token_1: str,
         downswing_df = lr_df.filter(pl.col('delta_z') > 1e-6)
 
     time_from_max = lr_df.height - far_idx
+    upswing_len = upswing_df.height
+    downswing_len = downswing_df.height
 
+    # Сила тренда на участке от максимального удаления от нуля до входа в позицию
+    entry_df = lr_df[far_idx:]
+    entry_spread = entry_df['spread'].to_numpy()
+    k_entry, b_entry = lr_coefs(entry_spread)
+    y_end_entry = k_entry * (len(entry_spread) - 1) + b_entry
+    entry_trend = abs((y_end_entry - b_entry) / b_entry * 100)
+
+    # Дистанция до выхода из позиции
+    pos_distance = thresh_in + thresh_out
+    neg_distance = sl_spread_std - thresh_in
+
+    # Чувствительность на участке движения z_score к среднему значению
+    entry_z_distance = abs(entry_df['z_score'][-1] - entry_df['z_score'][0])
+    entry_pr_distance = entry_df['profit'][-1] - entry_df['profit'][0]
+    entry_df_sens = entry_pr_distance / entry_z_distance
+    entry_df_potential_profit = entry_df_sens * pos_distance
+
+    # Общая чувствительность
     pos_sens_arr = calculate_rolling_sensitivity(upswing_df, 120)
     neg_sens_arr = calculate_rolling_sensitivity(downswing_df, 120)
 
@@ -960,9 +991,6 @@ def get_open_time_stats(token_1: str,
     sens_ratio = pos_sens_mean / neg_sens_mean - 1
 
     # Потенциальный профит и убыток
-    pos_distance = thresh_in + thresh_out
-    neg_distance = sl_spread_std - thresh_in
-
     potential_profit_mean = pos_sens_mean * pos_distance
     potential_profit_max = pos_sens_max * pos_distance
     potential_profit_min = pos_sens_min * pos_distance
@@ -1021,15 +1049,28 @@ def get_open_time_stats(token_1: str,
     distance = np.linalg.norm(t1_norm - t2_norm)
 
     # ----- Расчёт RSI -----
-    spread_rsi_1h = rsi(agg_df, window=14, col_name='log_spread')['rsi'][-1]
-    rsi_t1_1h = rsi(agg_df, window=14, col_name=token_1)['rsi'][-1]
-    rsi_t2_1h = rsi(agg_df, window=14, col_name=token_2)['rsi'][-1]
-    rsi_long_1h  = rsi_t1_1h if side_1 == 'long' else rsi_t2_1h
-    rsi_short_1h = rsi_t2_1h if side_1 == 'long' else rsi_t1_1h
+    spread_rsi_14h = rsi(agg_df, window=14, col_name='log_spread')['rsi'][-1]
+    spread_rsi_24h = rsi(agg_df, window=24, col_name='log_spread')['rsi'][-1]
+    spread_rsi_48h = rsi(agg_df, window=48, col_name='log_spread')['rsi'][-1]
+
+    rsi_t1_14h = rsi(agg_df, window=14, col_name=token_1)['rsi'][-1]
+    rsi_t2_14h = rsi(agg_df, window=14, col_name=token_2)['rsi'][-1]
+    rsi_long_14h  = rsi_t1_14h if side_1 == 'long' else rsi_t2_14h
+    rsi_short_14h = rsi_t2_14h if side_1 == 'long' else rsi_t1_14h
+
+    rsi_t1_24h = rsi(agg_df, window=24, col_name=token_1)['rsi'][-1]
+    rsi_t2_24h = rsi(agg_df, window=24, col_name=token_2)['rsi'][-1]
+    rsi_long_24h  = rsi_t1_24h if side_1 == 'long' else rsi_t2_24h
+    rsi_short_24h = rsi_t2_24h if side_1 == 'long' else rsi_t1_24h
+
+    rsi_t1_48h = rsi(agg_df, window=48, col_name=token_1)['rsi'][-1]
+    rsi_t2_48h = rsi(agg_df, window=48, col_name=token_2)['rsi'][-1]
+    rsi_long_48h  = rsi_t1_48h if side_1 == 'long' else rsi_t2_48h
+    rsi_short_48h = rsi_t2_48h if side_1 == 'long' else rsi_t1_48h
 
     # ----- Расчёт линии тренда, построенной поверх логарифмического спреда -----
-    tick_spread_wind = tick_df['log_spread'].to_numpy()
-    tick_spread_hb = tick_df['log_spread'].tail(hours_back * 12 * 60).to_numpy()
+    tick_spread_wind = agg_df['log_spread'].to_numpy()
+    tick_spread_hb = tick_df['log_spread'].to_numpy()
     k_wind, b_wind = lr_coefs(tick_spread_wind)
     k_hb, b_hb = lr_coefs(tick_spread_hb)
     y_end_wind = k_wind * (len(tick_spread_wind) - 1) + b_wind
@@ -1048,7 +1089,7 @@ def get_open_time_stats(token_1: str,
     beta_hb = np.cov(x, y)[0, 1] / np.var(x)
 
     # ----- Расчёт half-life и пересечений с нулём ------
-    half_life_log_spread = calculate_half_life(tick_spread_wind) / 12 / 60
+    half_life_log_spread = calculate_half_life(tick_spread_wind)
 
     lr_whole_time_df = calculate_lr_on_dataset(agg_df, token_1, token_2)
     lr_spread = lr_whole_time_df['spread'].to_numpy()
@@ -1149,6 +1190,8 @@ def get_open_time_stats(token_1: str,
         dist_downswing_df = dist_df.filter(pl.col('delta_z') > 1e-6)
 
     time_from_max_dist = dist_df.height - far_idx_d
+    dist_upswing_len = dist_upswing_df.height
+    dist_downswing_len = dist_downswing_df.height
 
     dist_pos_sens_arr = calculate_rolling_sensitivity(dist_upswing_df, 120)
     dist_neg_sens_arr = calculate_rolling_sensitivity(dist_downswing_df, 120)
@@ -1202,15 +1245,71 @@ def get_open_time_stats(token_1: str,
     lr_dist_z_mean = (lr_z_curr + dist_z_curr) / 2
     lr_dist_sign = lr_z_curr * dist_z_curr > 0
 
+    # ----- Фандинг -----
+    fund_1, next_time_1 = db_manager.get_next_funding(token_1, open_time)
+    fund_2, next_time_2 = db_manager.get_next_funding(token_2, open_time)
+    delta_1 = next_time_1 - open_time
+    delta_2 = next_time_2 - open_time
+
+    time_to_pay_1 = round(delta_1.days * 24 + delta_1.seconds / 3600, 2)
+    time_to_pay_2 = round(delta_2.days * 24 + delta_2.seconds / 3600, 2)
+
+    fund_long = fund_1 if side_1 == 'long' else fund_2
+    fund_short = fund_2 if side_1 == 'long' else fund_1
+    ttp_long = time_to_pay_1 if side_1 == 'long' else time_to_pay_2
+    ttp_short = time_to_pay_2 if side_1 == 'long' else time_to_pay_1
+
+    ttp_long_greater = int(ttp_long > ttp_short)
+    ttp_short_greater = int(ttp_long < ttp_short)
+
+    # ----- Производные характеристики -----
+    std_5m_ratio = long_std_5m / short_std_5m
+    std_hb_ratio = long_std_hb / short_std_hb
+    std_wind_ratio = long_std_wind / short_std_wind
+
+    long_price = tick_df[token_1][-1] if side_1 == 'long' else tick_df[token_2][-1]
+    short_price = tick_df[token_2][-1] if side_1 == 'long' else tick_df[token_1][-1]
+
+    price_ratio = long_price / short_price
+
+    long_z_wind = (long_mean_wind - long_price) / long_std_wind
+    short_z_wind = (short_mean_wind - short_price) / short_std_wind
+    long_z_hb = (long_mean_hb - long_price) / long_std_hb
+    short_z_hb = (short_mean_hb - short_price) / short_std_hb
+    long_z_5m = (long_mean_5m - long_price) / long_std_5m
+    short_z_5m = (short_mean_5m - short_price) / short_std_5m
+
+
     return {
+        # ----- Фандинг -----
+        'funding_long': fund_long,
+        'funding_short': fund_short,
+        'ttp_long': ttp_long, # (time to pay) Время до выплаты фандинга по long-позиции
+        'ttp_short': ttp_short,
+        'ttp_long_greater': ttp_long_greater,
+        'ttp_short_greater': ttp_short_greater,
+
+        # ----- Характеристики отдельных токенов -----
+        'long_z_wind': long_z_wind,   # z_score для токенов, аналог полос Боллинджера
+        'short_z_wind': short_z_wind,
+        'long_z_hb': long_z_hb,
+        'short_z_hb': short_z_hb,
+        'long_z_5m': long_z_5m,
+        'short_z_5m': short_z_5m,
+
+
         # ----- Характеристики волатильности -----
+        'price_ratio': price_ratio,
         'euc_distance': distance,          # Евклидово расстояние между активами
-        'long_std_wind': long_std_wind,    # Стандартное отклонение спреда за последние wind часов
+        'long_std_wind': long_std_wind,
         'short_std_wind': short_std_wind,
         'long_std_hb': long_std_hb,
         'short_std_hb': short_std_hb,
         'long_std_5m': long_std_5m,
         'short_std_5m': short_std_5m,
+        'std_5m_ratio': std_5m_ratio,
+        'std_hb_ratio': std_hb_ratio,
+        'std_wind_ratio': std_wind_ratio,
 
         # ----- Характеристики LinReg спреда за {hours_back} часов -----
         'lr_spr_curr': lr_spr_curr,
@@ -1221,7 +1320,7 @@ def get_open_time_stats(token_1: str,
         'lr_spr_max_range': lr_spr_max_range,
         'lr_spr_curr_dist_from_max': lr_spr_curr_dist_from_max,
         'lr_spr_std_hb': lr_spr_std_hb,
-        'lr_spr_std_5m': lr_spr_std_5m,
+        'lr_spr_std_5m': lr_spr_std_5m, # Волатильность спреда LR за 5 минут
         'time_from_max': time_from_max,
 
         # ----- Характеристики лог-спреда за {hours_back} часов -----
@@ -1234,12 +1333,12 @@ def get_open_time_stats(token_1: str,
         'spr_curr_dist_to_mean': spr_dist_to_mean,
         'spr_dist_from_max': spr_dist_from_max,
         'spr_std_hb': spr_std_hb,
-        'spr_std_5m': spr_std_5m,
+        'spr_std_5m': spr_std_5m, # Волатильность лог-спреда за 5 минут
         'time_from_max_dist': time_from_max_dist,
 
         # ----- Характеристики лог-спреда -----
-        'spr_mean_wind': spr_mean_wind,      # Среднее значение спреда за последние wind часов
-        'spr_mean_diff': spr_mean_diff, # Изменение среднего значения между 2 часами и wind часами в %
+        'spr_mean_wind': spr_mean_wind,   # Среднее значение спреда за последние wind часов
+        'spr_mean_diff': spr_mean_diff,   # Изменение среднего значения между 2 часами и wind часами в %
 
         # ----- Коэффициент хеджирования -----
         'tls_beta_wind': tls_beta_wind,
@@ -1249,14 +1348,21 @@ def get_open_time_stats(token_1: str,
 
         # ----- Характеристики движения спреда -----
         'hurst_wind': H_wind,         # Показатель Хёрста за wind часов
-        'spread_rsi': spread_rsi_1h,
-        'rsi_long': rsi_long_1h,      # Индикатор RSI на агрегированном по 1 часу цене long-токена
-        'rsi_short': rsi_short_1h,
+        'spread_rsi_14h': spread_rsi_14h,
+        'spread_rsi_24h': spread_rsi_24h,
+        'spread_rsi_48h': spread_rsi_48h,
+        'rsi_long_14h': rsi_long_14h,
+        'rsi_long_24h': rsi_long_24h,
+        'rsi_long_48h': rsi_long_48h,
+        'rsi_short_14h': rsi_short_14h,
+        'rsi_short_24h': rsi_short_24h,
+        'rsi_short_48h': rsi_short_48h,
         'trend_wind': trend_wind,     # Отношение конца регрессионной прямой к началу за wind часов
         'trend_hb': trend_hb,
+        'entry_df_trend': entry_trend, # Сила тренда при движении z_score от макс. удаления к 0
         'half_life_log_spread': half_life_log_spread,
         'half_life_lr_spread': half_life_lr_spread,
-        'n_intersections': n_intersections,
+        'n_intersections': n_intersections,       # Число пересечений LR спреда с нулём за wind часов
         'n_intersections_hb': n_intersections_hb,
 
         # ----- Корреляция -----
@@ -1275,6 +1381,9 @@ def get_open_time_stats(token_1: str,
         'neg_sens_mean': neg_sens_mean,
         'neg_sens_min': neg_sens_min,
         'sens_ratio': sens_ratio,
+        'upswing_len': upswing_len,
+        'downswing_len': downswing_len,
+        'entry_df_sens': entry_df_sens, # Чувствительность при движении z_score от макс. удаления к 0
 
         # ----- Чуствительность движения профита к движению z_score log -----
         'dist_pos_sens_max': dist_pos_sens_max,
@@ -1284,6 +1393,8 @@ def get_open_time_stats(token_1: str,
         'dist_neg_sens_mean': dist_neg_sens_mean,
         'dist_neg_sens_min': dist_neg_sens_min,
         'dist_sens_ratio': dist_sens_ratio,
+        'dist_upswing_len': dist_upswing_len,
+        'dist_downswing_len': dist_downswing_len,
 
         # ----- Потенциальный доход и убыток -----
         'potential_profit_mean': potential_profit_mean,
@@ -1295,6 +1406,7 @@ def get_open_time_stats(token_1: str,
         'pl_ratio_mean': pl_ratio_mean,
         'pl_ratio_worst': pl_ratio_worst,
         'pl_ratio_best': pl_ratio_best,
+        'entry_df_potential_profit': entry_df_potential_profit,
 
         'dist_potential_profit_mean': dist_potential_profit_mean,
         'dist_potential_profit_max': dist_potential_profit_max,
@@ -1305,7 +1417,6 @@ def get_open_time_stats(token_1: str,
         'dist_pl_ratio_mean': dist_pl_ratio_mean,
         'dist_pl_ratio_worst': dist_pl_ratio_worst,
         'dist_pl_ratio_best': dist_pl_ratio_best,
-
 
         # ----- Характеристики объёмов покупок и продаж -----
         'ask_usdt_mean_wind': ask_usdt_mean_wind, # Торговый объём в usdt (ask) за последние {wind} часов

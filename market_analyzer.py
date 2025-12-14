@@ -275,13 +275,6 @@ def main(update_leverage):
                 token_1 = t1_name + '_USDT'
                 token_2 = t2_name + '_USDT'
 
-                # --- Проверяем пару на наличие в стоп-листе ---
-                if stop_list.filter(
-                        ((pl.col('token_1') == token_1) & (pl.col('token_2') == token_2)) |
-                        ((pl.col('token_1') == token_2) & (pl.col('token_2') == token_1))
-                    ).height > 0:
-                    continue
-
                 # --- Обновляем открытые пары и текущие ордеры ---
                 if update_positions_flag:
                     if mode == 'real':
@@ -297,12 +290,6 @@ def main(update_leverage):
 
                 # --- Проверяем, что датафрейм не пустой ---
                 if t1_tick_df.height < 3 or t2_tick_df.height < 3:
-                    continue
-
-                # --- Проверяем, что этой пары нет в очереди на закрытие ---
-                if pairs.filter((pl.col('token_1') == token_1) &
-                                (pl.col('token_2') == token_2) &
-                                (pl.col('status') == 'closing')).height > 0:
                     continue
 
                 # Пропускаем пару, если уже открыто максимальное количество позиций,
@@ -355,30 +342,34 @@ def main(update_leverage):
                     fixed_std = curr_pair['fixed_std'][0]
                     fixed_z_score = (lr_spread - fixed_mean) / fixed_std
 
+                # ----- Добавляем пару в треккинг -----
+                if (not (token_1, token_2) in curr_tracking_in and
+                        open_method == 'reverse_static' and
+                        abs(lr_zscore) > abs(thresh_in) + dist_in):
+                    curr_tracking_in[(token_1, token_2)] = 1
+                    print(f'{ct} Add to tracking: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}')
+                # ----- Удаляем пару из треккинга -----
+                elif (token_1, token_2) in curr_tracking_in and abs(lr_zscore) < thresh_in - width_zone_in:
+                    curr_tracking_in.pop((token_1, token_2))
+                    print(f'{ct} Stop tracking: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}')
 
                 # ----- Проверяем условия для входа в позицию -----
                 if open_new_orders and pairs.height < max_pairs and check_tokens(token_1, token_2, pairs, stop_list):
                     pos_opened = False
                     # ----- Вход в позицию на возврате спреда к среднему значению -----
                     if open_method == 'reverse_static':
-                        # Если пара токенов входит в диапазон открытия позиции, и она ещё не отслеживается, добавляем в треккинг
-                        if abs(lr_zscore) > abs(thresh_in) + dist_in and not (token_1, token_2) in curr_tracking_in:
-                            curr_tracking_in[(token_1, token_2)] = 1
-                            print(f'{ct} Add to tracking: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}')
-                        # Если открыто максимальное кол-во позиций, а текущая пара выходит из диапазона входа, убираем из отслеживаемых
-                        elif (token_1, token_2) in curr_tracking_in and abs(lr_zscore) < thresh_in - width_zone_in and len(pairs) >= max_pairs:
-                            curr_tracking_in.pop((token_1, token_2))
-                            print(f'{ct} Stop tracking: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}')
                         # Если z_score возвращается ниже отметки in_, входим в позицию
-                        elif (token_1, token_2) in curr_tracking_in and abs(lr_zscore) < thresh_in and abs(lr_zscore) > thresh_in - width_zone_in:
+                        if ((token_1, token_2) in curr_tracking_in and
+                                    abs(lr_zscore) < thresh_in and
+                                    abs(lr_zscore) > thresh_in - width_zone_in):
                             if lr_zscore < 0:
-                                print(f'{ct} Создаём ордер: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}, z_score_2: {dist_zscore:.2f}')
+                                # print(f'{ct} Создаём ордер: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}, z_score_2: {dist_zscore:.2f}')
                                 pos_opened = open_position(token_1, token_2, mode, t1_data, t2_data,
                                     'long', 'short', leverage, min_order, max_order, fee_rate,
                                     lr_spr_mean, lr_spr_std, coin_information, db_manager)
                                 update_positions_flag = True
                             elif lr_zscore > 0:
-                                print(f'{ct} Создаём ордер: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}, z_score_2: {dist_zscore:.2f}')
+                                # print(f'{ct} Создаём ордер: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}, z_score_2: {dist_zscore:.2f}')
                                 pos_opened = open_position(token_1, token_2, mode, t1_data, t2_data,
                                     'short', 'long', leverage, min_order, max_order, fee_rate,
                                     lr_spr_mean, lr_spr_std, coin_information, db_manager)
@@ -478,4 +469,4 @@ def main(update_leverage):
 
 
 if __name__ == '__main__':
-    main(update_leverage=0)
+    main(update_leverage=True)

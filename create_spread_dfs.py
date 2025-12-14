@@ -1,4 +1,4 @@
-from bot.utils.pair_trading import make_df_from_orderbooks, make_trunc_df, create_zscore_df
+from bot.utils.pair_trading import create_zscore_df, load_data
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import polars as pl
@@ -14,30 +14,12 @@ db_manager = DBManager(db_params)
 # from bot.core.exchange.http_api import ExchangeManager, BybitRestAPI
 from bot.utils.files import load_config
 
-def create_dfs(token_pairs, spread_method, tf, winds, start_time, valid_time, end_time, min_order):
+def create_dfs(token_pairs, spread_method, tf, winds, valid_time, end_time):
     for token_1, token_2 in tqdm(token_pairs):
-        t1_name = token_1 + '_USDT'
-        t2_name = token_2 + '_USDT'
+        tick_df, agg_df = load_data(token_1, token_2, valid_time, end_time,
+                                    tf, int(max(winds)), db_manager)
 
-        token_1_first_date = db_manager.get_oldest_date_in_orderbook(t1_name)
-        token_2_first_date = db_manager.get_oldest_date_in_orderbook(t2_name)
-
-        if token_1_first_date > start_time or token_2_first_date > start_time:
-            tqdm.write(f'Для пары {token_1} - {token_2} не хватает тренировочной выборки.')
-            continue
-
-        df_1 = db_manager.get_tick_ob(token=t1_name,
-                                        start_time=start_time,
-                                        end_time=end_time)
-        df_2 = db_manager.get_tick_ob(token=t2_name,
-                                        start_time=start_time,
-                                        end_time=end_time)
-
-        df = make_df_from_orderbooks(df_1, df_2, token_1, token_2, start_time=start_time)
-        agg_df = make_trunc_df(df, timeframe=tf, token_1=token_1, token_2=token_2, method='triple')
-        tick_df = make_df_from_orderbooks(df_1, df_2, token_1, token_2, start_time=start_time)
-
-        start_ts = int(datetime.timestamp(valid_time))
+        start_ts = tick_df['ts'][0]
         spread_df = create_zscore_df(token_1, token_2, tick_df, agg_df, tf, winds,
                                      start_ts, median_length=6, spr_method=spread_method)
 
@@ -99,14 +81,11 @@ if __name__ == '__main__':
 
     spread_method = config['backtest_spr_method']
     min_order = config['min_order']
-
     end_time = config['end_time']
     valid_time = config['valid_time']
     start_time = config['start_time']
-
     search_space = config['search_space']
     n_tf = len(search_space)
-
     filename = config['token_pairs_file']
 
     token_pairs = []
@@ -117,7 +96,7 @@ if __name__ == '__main__':
 
     for tf, winds in search_space.items():
         winds = np.array(winds)
-        create_dfs(token_pairs, spread_method, tf, winds, start_time, valid_time, end_time, min_order)
+        create_dfs(token_pairs, spread_method, tf, winds, valid_time, end_time)
     db_manager.close()
 
     # merge_files(n_tf, token_pairs, spread_method, valid_time, end_time)

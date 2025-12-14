@@ -1107,44 +1107,54 @@ def get_open_time_stats(token_1: str,
     y = log_df_wind[token_1].to_numpy()
     beta_wind = np.cov(x, y)[0, 1] / np.var(x)
 
-
-
     # ----- Расчёт показателей торгового объёма -----
-    # За 2 * {wind} часов
-    tick_df_wind = tick_df.tail(2 * wind * 12 * 60).with_columns(
-        (pl.col(f'{token_1}_ask_size') * pl.col(f'{token_1}_ask_price')).alias('ask_usdt'),
-        (pl.col(f'{token_1}_bid_size') * pl.col(f'{token_1}_bid_price')).alias('bid_usdt')
-    )
-    ask_usdt_mean_wind = tick_df_wind['ask_usdt'].mean()
-    bid_usdt_mean_wind = tick_df_wind['bid_usdt'].mean()
-    bid_ask_ratio_wind = bid_usdt_mean_wind / ask_usdt_mean_wind - 1
-
     # За последние hours_back часов
-    tick_df_hb = tick_df.tail(2 * 12 * 60).with_columns(
-        (pl.col(f'{token_1}_ask_size') * pl.col(f'{token_1}_ask_price')).alias('ask_usdt'),
-        (pl.col(f'{token_1}_bid_size') * pl.col(f'{token_1}_bid_price')).alias('bid_usdt')
+    tick_df_hb = tick_df.with_columns(
+        (pl.col(f'{token_1}_ask_size') * pl.col(f'{token_1}_ask_price')).alias('ask1_usdt'),
+        (pl.col(f'{token_1}_bid_size') * pl.col(f'{token_1}_bid_price')).alias('bid1_usdt'),
+        (pl.col(f'{token_2}_ask_size') * pl.col(f'{token_2}_ask_price')).alias('ask2_usdt'),
+        (pl.col(f'{token_2}_bid_size') * pl.col(f'{token_2}_bid_price')).alias('bid2_usdt'),
     )
 
-    ask_usdt_mean_hb = tick_df_hb['ask_usdt'].mean()
-    bid_usdt_mean_hb = tick_df_hb['bid_usdt'].mean()
-    bid_ask_ratio_hb = bid_usdt_mean_hb / ask_usdt_mean_hb - 1
+    t1_ask_usdt_mean_hb = tick_df_hb['ask1_usdt'].mean()
+    t1_bid_usdt_mean_hb = tick_df_hb['bid1_usdt'].mean()
+    t2_ask_usdt_mean_hb = tick_df_hb['ask2_usdt'].mean()
+    t2_bid_usdt_mean_hb = tick_df_hb['bid2_usdt'].mean()
+    t1_bid_ask_ratio_hb = t1_bid_usdt_mean_hb / t1_ask_usdt_mean_hb - 1
+    t2_bid_ask_ratio_hb = t2_bid_usdt_mean_hb / t2_ask_usdt_mean_hb - 1
+    t1_t2_ask_ratio_hb = t1_ask_usdt_mean_hb / t2_ask_usdt_mean_hb - 1
+    t1_t2_bid_ratio_hb = t1_bid_usdt_mean_hb / t2_bid_usdt_mean_hb - 1
+    t1_t2_usdt_ratio_hb = (t1_ask_usdt_mean_hb + t1_bid_usdt_mean_hb
+                           ) / (t2_ask_usdt_mean_hb + t2_bid_usdt_mean_hb)
 
     # За последние 5 минут
     tick_df_5m = tick_df.tail(12 * 5).with_columns(
-        (pl.col(f'{token_1}_ask_size') * pl.col(f'{token_1}_ask_price')).alias('ask_usdt'),
-        (pl.col(f'{token_1}_bid_size') * pl.col(f'{token_1}_bid_price')).alias('bid_usdt')
+        (pl.col(f'{token_1}_ask_size') * pl.col(f'{token_1}_ask_price')).alias('ask1_usdt'),
+        (pl.col(f'{token_1}_bid_size') * pl.col(f'{token_1}_bid_price')).alias('bid1_usdt'),
+        (pl.col(f'{token_2}_ask_size') * pl.col(f'{token_2}_ask_price')).alias('ask2_usdt'),
+        (pl.col(f'{token_2}_bid_size') * pl.col(f'{token_2}_bid_price')).alias('bid2_usdt'),
     )
-    ask_usdt_mean_5m = tick_df_5m['ask_usdt'].mean()
-    bid_usdt_mean_5m = tick_df_5m['bid_usdt'].mean()
-    bid_ask_ratio_5m = bid_usdt_mean_5m / ask_usdt_mean_5m - 1
+    t1_ask_usdt_mean_5m = tick_df_5m['ask1_usdt'].mean()
+    t1_bid_usdt_mean_5m = tick_df_5m['bid1_usdt'].mean()
+    t2_ask_usdt_mean_5m = tick_df_5m['ask2_usdt'].mean()
+    t2_bid_usdt_mean_5m = tick_df_5m['bid2_usdt'].mean()
+    t1_bid_ask_ratio_5m = t1_bid_usdt_mean_5m / t1_ask_usdt_mean_5m - 1
+    t2_bid_ask_ratio_5m = t2_bid_usdt_mean_5m / t2_ask_usdt_mean_5m - 1
+    t1_t2_ask_ratio_5m = t1_ask_usdt_mean_5m / t2_ask_usdt_mean_5m - 1
+    t1_t2_bid_ratio_5m = t1_bid_usdt_mean_5m / t2_bid_usdt_mean_5m - 1
+    t1_t2_usdt_ratio_5m = (t1_ask_usdt_mean_5m + t1_bid_usdt_mean_5m
+                           ) / (t2_ask_usdt_mean_5m + t2_bid_usdt_mean_5m)
 
-    # Отношение объёмов за последние 5 минут и 2 часа к историческим
-    ask_5m_hb_ratio = ask_usdt_mean_5m / ask_usdt_mean_hb - 1
-    bid_5m_hb_ratio = bid_usdt_mean_5m / bid_usdt_mean_hb - 1
-    ask_5m_wind_ratio = ask_usdt_mean_5m / ask_usdt_mean_wind - 1
-    bid_5m_wind_ratio = bid_usdt_mean_5m / bid_usdt_mean_wind - 1
-    ask_hb_wind_ratio = ask_usdt_mean_hb / ask_usdt_mean_wind - 1
-    bid_hb_wind_ratio = bid_usdt_mean_hb / bid_usdt_mean_wind - 1
+    # Изменение объёмов за последние 5 минут относительно 2 часов
+    t1_ask_ratio = t1_ask_usdt_mean_5m / t1_ask_usdt_mean_hb - 1
+    t1_bid_ratio = t1_bid_usdt_mean_5m / t1_bid_usdt_mean_hb - 1
+    t2_ask_ratio = t2_ask_usdt_mean_5m / t2_ask_usdt_mean_hb - 1
+    t2_bid_ratio = t2_bid_usdt_mean_5m / t2_bid_usdt_mean_hb - 1
+    t1_hist_ratio = (t1_ask_usdt_mean_5m + t1_bid_usdt_mean_5m
+                     ) / (t1_ask_usdt_mean_hb + t1_bid_usdt_mean_hb)
+    t2_hist_ratio = (t2_ask_usdt_mean_5m + t2_bid_usdt_mean_5m
+                     ) / (t2_ask_usdt_mean_hb + t2_bid_usdt_mean_hb)
+    t1_t2_hist_ratio = t1_hist_ratio / t2_hist_ratio - 1
 
     # ----- Характеристики z_score дистанционного метода за {hours_back} часов -----
     dist_df = create_zscore_df(token_1, token_2, tick_df, agg_df, tf,
@@ -1419,21 +1429,32 @@ def get_open_time_stats(token_1: str,
         'dist_pl_ratio_best': dist_pl_ratio_best,
 
         # ----- Характеристики объёмов покупок и продаж -----
-        'ask_usdt_mean_wind': ask_usdt_mean_wind, # Торговый объём в usdt (ask) за последние {wind} часов
-        'bid_usdt_mean_wind': bid_usdt_mean_wind, # Торговый объём в usdt (bid) за последние {wind} часов
-        'bid_ask_ratio_wind': bid_ask_ratio_wind,
-        'ask_usdt_mean_hb': ask_usdt_mean_hb,
-        'bid_usdt_mean_hb': bid_usdt_mean_hb,
-        'bid_ask_ratio_hb': bid_ask_ratio_hb,
-        'ask_usdt_mean_5m': ask_usdt_mean_5m,
-        'bid_usdt_mean_5m': bid_usdt_mean_5m,
-        'bid_ask_ratio_5m': bid_ask_ratio_5m,
-        'ask_5m_hb_ratio': ask_5m_hb_ratio,
-        'bid_5m_hb_ratio': bid_5m_hb_ratio,
-        'ask_5m_wind_ratio': ask_5m_wind_ratio,
-        'bid_5m_wind_ratio': bid_5m_wind_ratio,
-        'ask_hb_wind_ratio': ask_hb_wind_ratio,
-        'bid_hb_wind_ratio': bid_hb_wind_ratio,
+        't1_ask_usdt_mean_hb': t1_ask_usdt_mean_hb,
+        't1_bid_usdt_mean_hb': t1_bid_usdt_mean_hb,
+        't2_ask_usdt_mean_hb': t2_ask_usdt_mean_hb,
+        't2_bid_usdt_mean_hb': t2_bid_usdt_mean_hb,
+        't1_bid_ask_ratio_hb': t1_bid_ask_ratio_hb,
+        't2_bid_ask_ratio_hb': t2_bid_ask_ratio_hb,
+        't1_t2_ask_ratio_hb': t1_t2_ask_ratio_hb,
+        't1_t2_bid_ratio_hb': t1_t2_bid_ratio_hb,
+        't1_t2_usdt_ratio_hb': t1_t2_usdt_ratio_hb,
+        't1_ask_usdt_mean_5m': t1_ask_usdt_mean_5m,
+        't1_bid_usdt_mean_5m': t1_bid_usdt_mean_5m,
+        't2_ask_usdt_mean_5m': t2_ask_usdt_mean_5m,
+        't2_bid_usdt_mean_5m': t2_bid_usdt_mean_5m,
+        't1_bid_ask_ratio_5m': t1_bid_ask_ratio_5m,
+        't2_bid_ask_ratio_5m': t2_bid_ask_ratio_5m,
+        't1_t2_ask_ratio_5m': t1_t2_ask_ratio_5m,
+        't1_t2_bid_ratio_5m': t1_t2_bid_ratio_5m,
+        't1_t2_usdt_ratio_5m': t1_t2_usdt_ratio_5m,
+        't1_ask_ratio': t1_ask_ratio,
+        't1_bid_ratio': t1_bid_ratio,
+        't2_ask_ratio': t2_ask_ratio,
+        't2_bid_ratio': t2_bid_ratio,
+        't1_hist_ratio': t1_hist_ratio,
+        't2_hist_ratio': t2_hist_ratio,
+        't1_t2_hist_ratio': t1_t2_hist_ratio,
+
 
         # ----- Характеристики изменения z_score -----
         'z_score_5m_change': z_score_5m_change,

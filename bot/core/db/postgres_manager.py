@@ -39,29 +39,61 @@ class DBManager:
             result = cur.fetchone()
             return result[0] if result else None
 
-    def update_funding_data(self, records):
+    def update_funding(self, df, batch_size=1000):
         """
-        Обновление данных фандинга. Если запись с таким же (token, exchange)
-        уже существует, она будет заменена новыми данными.
+        Вставляет или обновляет данные в таблицу funding_history.
 
-        :param records: список кортежей, где каждый кортеж имеет вид:
-                        (token, exchange, ask_price, bid_price, funding_rate, fund_interval, next_fund_time)
+        Parameters:
+        -----------
+        df : polars.DataFrame
+            Датафрейм с данными
         """
-        sql = """
-        INSERT INTO funding_data (token, exchange, ask_price, bid_price, funding_rate, fund_interval, next_fund_time)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (token, exchange) DO UPDATE SET
-            ask_price = EXCLUDED.ask_price,
-            bid_price = EXCLUDED.bid_price,
-            funding_rate = EXCLUDED.funding_rate,
-            fund_interval = EXCLUDED.fund_interval,
-            next_fund_time = EXCLUDED.next_fund_time;
-        """
-        if isinstance(records, pl.DataFrame):
-            records = records.rows()
+        data = df.select(["symbol", "funding", "ts", "time"]).rows()
 
-        with self.conn.cursor() as cursor:
-            cursor.executemany(sql, records)
+        query = """
+            INSERT INTO funding_history (symbol, funding, ts, time)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (symbol, ts)
+            DO UPDATE SET
+                funding = EXCLUDED.funding
+            """
+
+        with self.conn.cursor() as cur:
+            cur.executemany(query, data)
+
+    def get_next_funding(self, symbol, open_time):
+        """
+        Находит следующую выплату фандинга для указанного токена после заданного времени.
+
+        Parameters:
+        -----------
+        symbol : str
+            Токен (например, "TON" или "ZRO")
+        open_time : datetime with timezone
+            Время открытия сделки
+
+        Returns:
+        --------
+        tuple or None: (funding, time, ts) или None, если запись не найдена
+        """
+
+        query = """
+            SELECT funding, time
+            FROM funding_history
+            WHERE symbol = %s
+                AND time > %s
+            ORDER BY time ASC
+            LIMIT 1
+        """
+
+        with self.conn.cursor() as cur:
+            cur.execute(query, (symbol, open_time))
+            result = cur.fetchone()
+
+        if result:
+            funding, time = result
+            return float(funding), time
+        return None, None
 
     def add_pair_to_stop_list(self, token_1, token_2):
         """Добавляет новый ордер в таблицу stop_list"""

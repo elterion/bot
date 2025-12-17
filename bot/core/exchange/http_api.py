@@ -1,7 +1,6 @@
 import requests
 import pandas as pd
 import polars as pl
-import numpy as np
 from datetime import datetime
 import logging
 import pickle
@@ -126,31 +125,26 @@ class BybitRestAPI():
         return hist_df[['Open', 'High', 'Low', 'Close', 'Volume',
                             'Turnover', 'Exchange', 'Market_type']]
 
-    def get_tickers(self, session):
+    def get_tickers(self):
         endpoint = "/v5/market/tickers"
         params = {"category": self.category}
         exchange_rates = {}
 
-        data = requests.request('GET', self.BASE_URL + endpoint, params=params).json()
+        data = requests.get(url=self.BASE_URL+endpoint, params=params, timeout=(3, 4)).json()
 
         for ticker in data['result']['list']:
             vol24h = int(float(ticker['turnover24h']))
 
-            if ticker['symbol'].endswith('USDT') and vol24h > 1_000:
+            if ticker['symbol'].endswith('USDT') and vol24h > 10_000:
                 sym = ticker['symbol'][:-4] + '_' + ticker['symbol'][-4:]
 
-                if self.category == 'linear':
-                    next_ft = datetime.fromtimestamp(int(ticker['nextFundingTime'][:-3])).strftime('%Y-%m-%d %H:%M')
+                next_ft = datetime.fromtimestamp(int(ticker['nextFundingTime'][:-3])).strftime('%Y-%m-%d %H:%M')
 
-                    exchange_rates[sym] = {'bid_price': float(ticker['bid1Price']), 'ask_price': float(ticker['ask1Price']),
-                                           'bid_size': float(ticker['bid1Size']), 'ask_size': float(ticker['ask1Size']),
-                                           'last_price': float(ticker['lastPrice']), 'index_price': float(ticker['indexPrice']),
-                                           'vol24h_usdt': float(ticker['turnover24h']),
-                                           'funding_rate': float(ticker['fundingRate']), 'next_fund_time': next_ft}
-                elif self.category == 'spot':
-                    exchange_rates[sym] = {'bid_price': float(ticker['bid1Price']), 'ask_price': float(ticker['ask1Price']),
-                                           'bid_size': float(ticker['bid1Size']), 'ask_size': float(ticker['ask1Size']),
-                                           'last_price': float(ticker['lastPrice']), 'vol24h_usdt': vol24h}
+                exchange_rates[sym] = {'bid_price': float(ticker['bid1Price']), 'ask_price': float(ticker['ask1Price']),
+                                        'bid_size': float(ticker['bid1Size']), 'ask_size': float(ticker['ask1Size']),
+                                        'last_price': float(ticker['lastPrice']), 'index_price': float(ticker['indexPrice']),
+                                        'vol24h_usdt': float(ticker['turnover24h']),
+                                        'funding_rate': float(ticker['fundingRate']), 'next_fund_time': next_ft}
         return exchange_rates
 
     def get_funding_history(self, symbol, start_date, end_date=None, limit=200):
@@ -169,7 +163,7 @@ class BybitRestAPI():
                   }
             endpoint = '/v5/market/funding/history'
 
-            res = requests.request('GET', self.BASE_URL + endpoint, params=params).json()
+            res = requests.get(self.BASE_URL + endpoint, params=params, timeout=(3, 4)).json()
             lst = res['result']['list']
 
             if lst:

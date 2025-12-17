@@ -1,23 +1,19 @@
-from bot.core.exchange.http_api import ExchangeManager, BybitRestAPI
-from bot.utils.coins import get_step_info, get_price_scale
+from bot.core.exchange.http_api import BybitRestAPI
 from bot.core.exchange.trade_api import set_leverage
 from bot.utils.files import load_config
-from requests.exceptions import Timeout, ConnectionError
+from requests.exceptions import Timeout
 
 from bot.core.db.postgres_manager import DBManager
 from bot.config.credentials import host, user, password, db_name
 
 import polars as pl
 import numpy as np
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from time import sleep
 import pickle
-import json
 
-from zoneinfo import ZoneInfo
-from datetime import timedelta
-from bot.utils.pair_trading import get_lr_zscore, get_dist_zscore
-from uuid import uuid4
+from bot.utils.pair_trading import get_dist_zscore
 import math
 from functools import lru_cache
 
@@ -27,8 +23,8 @@ def round_down(value: float, dp: float):
 def open_position(token_1, token_2, mode, t1_data, t2_data, side_1, side_2, leverage,
                   min_order, max_order, fee_rate, spread_mean, spread_std, coin_information, db_manager):
     ct = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    t1_qty_step = get_step_info(coin_information, token_1, 'bybit_linear', 'bybit_linear')
-    t2_qty_step = get_step_info(coin_information, token_2, 'bybit_linear', 'bybit_linear')
+    t1_qty_step = coin_information[token_1]['qty_step']
+    t2_qty_step = coin_information[token_1]['qty_step']
 
     Moscow_TZ = timezone(timedelta(hours=3))
     created_at = datetime.now(Moscow_TZ).strftime('%Y-%m-%d %H:%M:%S')
@@ -144,7 +140,6 @@ def main(update_leverage):
     thresh_out = config['thresh_out']
     dist_in = config['dist_in']
     width_zone_in = config['width_zone_in']
-    # min_alt_zscore = config['min_alt_zscore']
 
     sl_profit_ratio = config['sl_profit_ratio']
     sl_spread_std = config['sl_spread_std']
@@ -167,8 +162,7 @@ def main(update_leverage):
             token_pairs.append((a, b))
 
     # --- Загружаем техническую информацию по монетам с биржи ---
-    exc_manager = ExchangeManager()
-    exc_manager.add_market("bybit_linear", BybitRestAPI('linear'))
+    exc_manager = BybitRestAPI('linear')
     coin_information = exc_manager.get_instrument_data()
 
     with open("./data/coin_information.pkl", "wb") as f:
@@ -196,7 +190,7 @@ def main(update_leverage):
         with open('./bot/config/tracking_pairs.txt', 'r') as f:
             for line in f:
                 key1, key2, value = line.strip().split()
-                curr_tracking_in[(key1, key2)] = int(value)
+                curr_tracking_in[(key1, key2)] = float(value)
         formatted_pairs = []
         for pair in curr_tracking_in.keys():
             formatted_pairs.append(f"{pair[0][:-5]}-{pair[1][:-5]}")
@@ -324,34 +318,34 @@ def main(update_leverage):
                 t1_curr = np.append(token_1_hist_price, t1_data['avg_price'][0])
                 t2_curr = np.append(token_2_hist_price, t2_data['avg_price'][0])
 
-                _, _, _, dist_zscore = get_dist_zscore(t1_med, t2_med, np.array([wind]))
-                dist_zscore = dist_zscore[0]
-
-                lr_spread, lr_spr_mean, lr_spr_std, _, _, lr_zscore = get_lr_zscore(t1_med, t2_med, np.array([wind]))
-                _, _, _, _, _, zscore_curr = get_lr_zscore(t1_curr, t2_curr, np.array([wind]))
+                spread, spr_mean, spr_std, dist_zscore = get_dist_zscore(t1_med, t2_med, np.array([wind]))
+                _, _, _, zscore_curr = get_dist_zscore(t1_curr, t2_curr, np.array([wind]))
                 z_score_curr = zscore_curr[0]
-                lr_spread, lr_spr_mean, lr_spr_std, lr_zscore = lr_spread[0], lr_spr_mean[0], lr_spr_std[0], lr_zscore[0]
+                spread, spr_mean, spr_std, z_score = spread[0], spr_mean[0], spr_std[0], dist_zscore[0]
 
-
-                # curr_spread = np.log(t1_data['avg_price'][0]) - np.log(t2_data['avg_price'][0])
                 curr_pair = pairs.filter(
                         (pl.col('token_1') == token_1) & (pl.col('token_2') == token_2)
                     )
                 if curr_pair.height > 0:
                     fixed_mean = curr_pair['fixed_mean'][0]
                     fixed_std = curr_pair['fixed_std'][0]
-                    fixed_z_score = (lr_spread - fixed_mean) / fixed_std
+                    fixed_z_score = (spread - fixed_mean) / fixed_std
 
                 # ----- Добавляем пару в треккинг -----
                 if (not (token_1, token_2) in curr_tracking_in and
-                        open_method == 'reverse_static' and
-                        abs(lr_zscore) > abs(thresh_in) + dist_in):
-                    curr_tracking_in[(token_1, token_2)] = 1
-                    print(f'{ct} Add to tracking: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}')
+                        curr_pair.height == 0 and
+                        open_method in ('reverse_static', 'reverse_dynamic') and
+                        abs(z_score) > abs(thresh_in) + dist_in):
+                    curr_tracking_in[(token_1, token_2)] = z_score
+                    print(f'{ct} Add to tracking: {t1_name} - {t2_name}; z_score: {z_score:.2f}')
+                # ----- Обновляем значения треккинга -----
+                elif ((token_1, token_2) in curr_tracking_in and
+                       abs(z_score) > abs(curr_tracking_in[(token_1, token_2)])):
+                    curr_tracking_in[(token_1, token_2)] = z_score
                 # ----- Удаляем пару из треккинга -----
-                elif (token_1, token_2) in curr_tracking_in and abs(lr_zscore) < thresh_in - width_zone_in:
+                elif (token_1, token_2) in curr_tracking_in and abs(z_score) < thresh_in - width_zone_in:
                     curr_tracking_in.pop((token_1, token_2))
-                    print(f'{ct} Stop tracking: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}')
+                    print(f'{ct} Stop tracking: {t1_name} - {t2_name}; z_score: {z_score:.2f}')
 
                 # ----- Проверяем условия для входа в позицию -----
                 if open_new_orders and pairs.height < max_pairs and check_tokens(token_1, token_2, pairs, stop_list):
@@ -360,40 +354,58 @@ def main(update_leverage):
                     if open_method == 'reverse_static':
                         # Если z_score возвращается ниже отметки in_, входим в позицию
                         if ((token_1, token_2) in curr_tracking_in and
-                                    abs(lr_zscore) < thresh_in and
-                                    abs(lr_zscore) > thresh_in - width_zone_in):
-                            if lr_zscore < 0:
-                                # print(f'{ct} Создаём ордер: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}, z_score_2: {dist_zscore:.2f}')
+                                    abs(z_score) < thresh_in and
+                                    abs(z_score) > thresh_in - width_zone_in):
+                            if z_score < 0:
+                                # print(f'{ct} Создаём ордер: {t1_name} - {t2_name}; z_score: {z_score:.2f}, z_score_2: {dist_zscore:.2f}')
                                 pos_opened = open_position(token_1, token_2, mode, t1_data, t2_data,
                                     'long', 'short', leverage, min_order, max_order, fee_rate,
-                                    lr_spr_mean, lr_spr_std, coin_information, db_manager)
+                                    spr_mean, spr_std, coin_information, db_manager)
                                 update_positions_flag = True
-                            elif lr_zscore > 0:
-                                # print(f'{ct} Создаём ордер: {t1_name} - {t2_name}; z_score: {lr_zscore:.2f}, z_score_2: {dist_zscore:.2f}')
+                            elif z_score > 0:
+                                # print(f'{ct} Создаём ордер: {t1_name} - {t2_name}; z_score: {z_score:.2f}, z_score_2: {dist_zscore:.2f}')
                                 pos_opened = open_position(token_1, token_2, mode, t1_data, t2_data,
                                     'short', 'long', leverage, min_order, max_order, fee_rate,
-                                    lr_spr_mean, lr_spr_std, coin_information, db_manager)
+                                    spr_mean, spr_std, coin_information, db_manager)
+                                update_positions_flag = True
+
+                            if pos_opened:
+                                curr_tracking_in.pop((token_1, token_2))
+                    # ----- Вход в позицию на возврате спреда к среднему значению при отклонении на dist_in от макс -----
+                    elif open_method == 'reverse_dynamic':
+                        # Если z_score возвращается ниже отметки max - dist_in, входим в позицию
+                        if ((token_1, token_2) in curr_tracking_in and
+                                abs(z_score) < abs(curr_tracking_in[(token_1, token_2)]) - dist_in and
+                                abs(z_score) > thresh_in):
+                            if z_score < 0:
+                                pos_opened = open_position(token_1, token_2, mode, t1_data, t2_data,
+                                    'long', 'short', leverage, min_order, max_order, fee_rate,
+                                    spr_mean, spr_std, coin_information, db_manager)
+                                update_positions_flag = True
+                            elif z_score > 0:
+                                pos_opened = open_position(token_1, token_2, mode, t1_data, t2_data,
+                                    'short', 'long', leverage, min_order, max_order, fee_rate,
+                                    spr_mean, spr_std, coin_information, db_manager)
                                 update_positions_flag = True
 
                             if pos_opened:
                                 curr_tracking_in.pop((token_1, token_2))
 
-
                     # ----- Прямой вход в позицию при пересечении уровня входа -----
                     elif open_method == 'direct':
                         # Открытие long-позиции по token_1 и short-позиции по token_2
-                        if lr_zscore < low_in and z_score_curr < low_in:
+                        if z_score < low_in and z_score_curr < low_in:
                             open_position(token_1, token_2, mode, t1_data, t2_data,
                                     'long', 'short', leverage, min_order, max_order, fee_rate,
-                                    lr_spr_mean, lr_spr_std, coin_information, db_manager)
+                                    spr_mean, spr_std, coin_information, db_manager)
                             update_positions_flag = True
                             break
 
                         # Открытие short-позиции по token_1 и long-позиции по token_2
-                        if lr_zscore > high_in and z_score_curr > high_in:
+                        if z_score > high_in and z_score_curr > high_in:
                             open_position(token_1, token_2, mode, t1_data, t2_data,
                                     'short', 'long', leverage, min_order, max_order, fee_rate,
-                                    lr_spr_mean, lr_spr_std, coin_information, db_manager)
+                                    spr_mean, spr_std, coin_information, db_manager)
                             update_positions_flag = True
                             break
 
@@ -419,7 +431,7 @@ def main(update_leverage):
                     curr_profit_2 = calculate_profit(t2_op, t2_tick_df['avg_price'].median(), q2, side_2)
 
                     curr_profit = curr_profit_1 + curr_profit_2
-                    zscore_arr.append((ts, 'bybit', token_1, token_2, curr_profit, lr_zscore, fixed_z_score, lr_spread))
+                    zscore_arr.append((ts, 'bybit', token_1, token_2, curr_profit, z_score, fixed_z_score, spread))
 
                     # --- Стоп-лосс по профиту ---
                     if curr_profit < -sl_profit_ratio * 2 * max_order:
@@ -438,12 +450,12 @@ def main(update_leverage):
 
                     # --- Выходим из позиции, если позволяют условия ---
                     if t1_vol > q1 and t2_vol > q2:
-                        if side_1 == 'long' and lr_zscore > high_out and z_score_curr > high_out:
+                        if side_1 == 'long' and z_score > high_out and z_score_curr > high_out:
                             db_manager.close_pair_order(mode, token_1, token_2, side_1, 'target')
                             print(f'{ct} [long close] sell {q1} {token_1}; buy {q2} {token_2}')
                             update_positions_flag = True
                             break
-                        elif side_1 == 'short' and lr_zscore < low_out and z_score_curr < low_out:
+                        elif side_1 == 'short' and z_score < low_out and z_score_curr < low_out:
                             db_manager.close_pair_order(mode, token_1, token_2, side_1, 'target')
                             print(f'{ct} [short close] buy {q1} {token_1}; sell {q2} {token_2}')
                             update_positions_flag = True

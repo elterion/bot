@@ -2,7 +2,6 @@ import polars as pl
 import polars_ols as pls
 import numpy as np
 from numba import njit
-from bot.utils.coins import get_step_info
 import math
 import ast
 from datetime import datetime, timedelta
@@ -472,8 +471,8 @@ def get_qty(
     if not token_2.endswith('_USDT'):
         token_2 += '_USDT'
 
-    dp_1 = get_step_info(coin_information, token_1, 'bybit_linear', 'bybit_linear')
-    dp_2 = get_step_info(coin_information, token_2, 'bybit_linear', 'bybit_linear')
+    dp_1 = coin_information[token_1]['qty_step']
+    dp_2 = coin_information[token_2]['qty_step']
 
     if method == 'beta_neutral':
         abs_beta = abs(beta)

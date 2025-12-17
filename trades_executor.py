@@ -181,8 +181,8 @@ def main():
                 price_2 = row['open_price_2']
                 leverage = row['leverage']
 
-                ps_1 = coin_information['bybit_linear'][token_1]['price_scale']
-                ps_2 = coin_information['bybit_linear'][token_1]['price_scale']
+                ps_1 = coin_information[token_1]['price_scale']
+                ps_2 = coin_information[token_2]['price_scale']
 
                 if status == 'opening':
                     sl_1 = round(price_1 - 0.8 * price_1 / leverage, ps_1) if side_1 == 'long' else round(price_1 + 0.8 * price_1 / leverage, ps_1)

@@ -39,7 +39,7 @@ class DBManager:
             result = cur.fetchone()
             return result[0] if result else None
 
-    def update_funding(self, df, batch_size=1000):
+    def update_funding(self, df):
         """
         Вставляет или обновляет данные в таблицу funding_history.
 

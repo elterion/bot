@@ -3,7 +3,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import matplotlib.pyplot as plt
-from bot.utils.pair_trading import get_lr_zscore, get_dist_zscore, get_tls_zscore
+from bot.utils.pair_trading import get_lr_zscore, get_dist_zscore
 from bot.core.db.postgres_manager import DBManager
 from bot.config.credentials import host, user, password, db_name
 
@@ -123,12 +123,10 @@ def all_pairs_monitoring(tf, wind, top_tokens):
 
         _, _, _, zscore = get_dist_zscore(t1_med, t2_med, np.array([wind]))
         spr, spr_mean, spr_std, alpha, lr_beta, lr_zscore = get_lr_zscore(t1_med, t2_med, np.array([wind]))
-        spr, spr_mean, spr_std, alpha, tls_beta, tls_zscore = get_tls_zscore(t1_med, t2_med, np.array([wind]))
         dist_z_score = zscore[0]
         lr_zscore = lr_zscore[0]
-        tls_zscore = tls_zscore[0]
 
-        all_pairs[(t1_name, t2_name)] = (dist_z_score, lr_zscore, tls_zscore)
+        all_pairs[(t1_name, t2_name)] = (lr_zscore, dist_z_score)
 
     sorted_pairs = sorted(
             all_pairs.items(),
@@ -138,6 +136,6 @@ def all_pairs_monitoring(tf, wind, top_tokens):
 
     for tokens, z_scores in sorted_pairs[:top_tokens]:
         t1, t2 = tokens
-        dist_z_score, lr_zscore, tls_zscore = z_scores
+        lr_zscore, dist_z_score = z_scores
 
-        print(f'{t1:>7} - {t2:7} lr: {lr_zscore:5.2f}; dist: {dist_z_score:5.2f}; tls: {tls_zscore:5.2f}')
+        print(f'{t1:>7} - {t2:7} lr: {lr_zscore:5.2f}; dist: {dist_z_score:5.2f}')

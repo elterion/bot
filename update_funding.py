@@ -24,6 +24,9 @@ def get_funding():
                             'funding': fr, 'time': ft}))
     df = df.with_columns(
             pl.col('time').str.to_datetime(format="%Y-%m-%d %H:%M"),
+            pl.when(pl.col("symbol").str.ends_with("USDT"))
+                .then(pl.col("symbol").str.replace(r"(_USDT)$", ""))
+                .otherwise(pl.col("symbol"))
         ).with_columns(
             (pl.col('time').dt.timestamp(time_unit='ms') // 1000).alias('ts')
         )

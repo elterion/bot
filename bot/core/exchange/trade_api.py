@@ -271,7 +271,13 @@ class Trade():
         return positions
 
     def _order_handler(self, resp, market_type):
-        data = resp['result']['list'][0]
+        try:
+            data = resp['result']['list'][0]
+        except KeyError:
+            print()
+            print(resp)
+            print()
+            raise PlaceOrderError
 
         token = data['symbol']
         if token.endswith('USDT'):

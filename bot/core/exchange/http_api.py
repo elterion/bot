@@ -2,17 +2,8 @@ import requests
 import pandas as pd
 import polars as pl
 from datetime import datetime
-import logging
 import pickle
 from time import sleep
-
-# Настройка логгирования
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s [%(levelname)s] %(message)s",
-                    datefmt="%Y-%m-%d %H:%M:%S")
-logging.getLogger('aiohttp').setLevel('ERROR')
-logging.getLogger('asyncio').setLevel('ERROR')
-logger = logging.getLogger()
 
 with open("./data/coin_information.pkl", "rb") as f:
     coin_information = pickle.load(f)
@@ -31,7 +22,7 @@ class BybitRestAPI():
         instr_data = {}
         for ticker in data['result']['list']:
             if ticker['status'] != 'Trading':
-                logger.warning(f'Bybit {ticker['symbol']} status is {ticker['status']}')
+                print(f'Bybit {ticker['symbol']} status is {ticker['status']}')
 
             if ticker['symbol'].endswith('USDT'):
                 base = ticker['baseCoin']
@@ -77,12 +68,11 @@ class BybitRestAPI():
 
         return self._parse_instr_data(r)
 
-
     def get_candles(self, symbol, interval, n_iters=1, end_date=None):
         symbol = self._create_symbol_name(symbol)
         endpoint = '/v5/market/kline'
         params = {'category': self.category, 'symbol': symbol, 'limit': 1000,
-                  'interval': self.interval_dic['bybit'][interval]}
+                  'interval': interval}
         if end_date is None:
             end_date = ''
 
@@ -91,12 +81,7 @@ class BybitRestAPI():
 
         try:
             for _ in range(n_iters):
-                data = requests.request('GET', self.BASE_URL + endpoint, params=params).json()
-
-                if not data:
-                    logger.warning(f"No data returned for {symbol}.")
-                    break
-
+                data = requests.get(self.BASE_URL + endpoint, params=params).json()
                 hist = data['result']['list']
                 params['end'] = str(int(hist[-1][0]) - 1)
 
@@ -105,10 +90,8 @@ class BybitRestAPI():
                                     ignore_index=True)
 
         except KeyError as e:
-            # logger.warning(f'No data for {exc} {self.category}')
             pass
         except Exception as e:
-            # logger.error(f"{exc} {self.category}. Error fetching data: {e}")
             pass
 
         hist_df[['Open', 'High', 'Low', 'Close', 'Volume', 'Turnover']] = hist_df[
@@ -119,11 +102,8 @@ class BybitRestAPI():
         hist_df.drop('Date', axis=1, inplace=True)
         hist_df.index = hist_df.index.tz_localize('UTC').tz_convert('Europe/Moscow')
         hist_df.sort_index(inplace=True)
-        hist_df['Exchange'] = 'bybit'
-        hist_df['Market_type'] = self.category
 
-        return hist_df[['Open', 'High', 'Low', 'Close', 'Volume',
-                            'Turnover', 'Exchange', 'Market_type']]
+        return hist_df[['Open', 'High', 'Low', 'Close', 'Volume', 'Turnover']]
 
     def get_tickers(self):
         endpoint = "/v5/market/tickers"

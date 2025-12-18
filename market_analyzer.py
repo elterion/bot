@@ -24,7 +24,7 @@ def open_position(token_1, token_2, mode, t1_data, t2_data, side_1, side_2, leve
                   min_order, max_order, fee_rate, spread_mean, spread_std, coin_information, db_manager):
     ct = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     t1_qty_step = coin_information[token_1]['qty_step']
-    t2_qty_step = coin_information[token_1]['qty_step']
+    t2_qty_step = coin_information[token_2]['qty_step']
 
     Moscow_TZ = timezone(timedelta(hours=3))
     created_at = datetime.now(Moscow_TZ).strftime('%Y-%m-%d %H:%M:%S')

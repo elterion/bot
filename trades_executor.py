@@ -3,6 +3,7 @@ from datetime import datetime
 import polars as pl
 import pickle
 from requests.exceptions import Timeout, ConnectionError
+from bot.core.exceptions.trading import PlaceOrderError
 
 from bot.core.db.postgres_manager import DBManager
 from bot.config.credentials import host, user, password, db_name
@@ -99,7 +100,7 @@ def main():
             for pos in active_positions:            # Перебираем по очереди все позиции, открытые на бирже
                 if pos['token'] not in token_list:  # Если токен есть на бирже, но не учтён в pairs
                     print(f'Токен {pos['token']} открыт на бирже, но отсутствует в pairs!')
-                    break
+                    return
 
             # --------------- Проверка сработавших стоп-лоссов --------------
             if len(active_orders) * 2 != len(active_positions):
@@ -190,13 +191,18 @@ def main():
                     act_1 = 'Buy' if side_1 == 'long' else 'Sell'
                     act_2 = 'Buy' if side_2 == 'long' else 'Sell'
 
-                    rsp = trade_manager.place_pair_order('linear', token_1, act_1, qty_1, sl_1, token_2, act_2, qty_2, sl_2)
-                    for r in rsp:
-                        res = trade_manager.get_order('linear', order_id=r)
-                        if res['token'] == token_1:
-                            open_price_1 = res['price']
-                        if res['token'] == token_2:
-                            open_price_2 = res['price']
+                    try:
+                        rsp = trade_manager.place_pair_order('linear', token_1, act_1, qty_1, sl_1, token_2, act_2, qty_2, sl_2)
+                        for r in rsp:
+                            res = trade_manager.get_order('linear', order_id=r)
+                            if res['token'] == token_1:
+                                open_price_1 = res['price']
+                            if res['token'] == token_2:
+                                open_price_2 = res['price']
+                    except PlaceOrderError:
+                        print(f'{token_1} - {token_2}; side: {side_1}; {qty_1=}, {qty_2=}')
+                        print(f'{ps_1=}, {ps_2=}; {sl_1=}, {sl_2=}')
+                        return
 
                     db_manager.commit_pair_order(mode, token_1, token_2, open_price_1, open_price_2)
                     print(f'{ct}. Open position. {act_1} {token_1[:-5]}; {act_2} {token_2[:-5]}')

@@ -78,12 +78,6 @@ def check_tokens(token_1: str, token_2: str, current_pairs: pl.DataFrame, stop_l
     else:
         return True
 
-def get_hist_df(db_manager, start_time):
-    hist_df = db_manager.get_orderbooks(interval='1h', start_date=start_time)
-    hist_df = hist_df.with_columns(pl.col('price').alias('avg_price'))
-
-    return hist_df
-
 def calculate_profit(open_price, close_price, n_coins, side, fee_rate=0.001):
     usdt_open = n_coins * open_price
     open_fee = usdt_open * fee_rate
@@ -172,19 +166,6 @@ def main(update_leverage):
     db_params = {'host': host, 'user': user, 'password': password, 'dbname': db_name}
     db_manager = DBManager(db_params)
 
-    if update_leverage:
-        print(f'{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Обновление плечей на бирже ByBit')
-        for t1_name, t2_name in token_pairs:
-            set_leverage_cached(demo, token=t1_name, leverage=leverage)
-            sleep(0.5)
-            set_leverage_cached(demo, token=t2_name, leverage=leverage)
-            sleep(0.5)
-
-    low_in = -thresh_in
-    low_out = -thresh_out
-    high_in = thresh_in
-    high_out = thresh_out
-
     try:
         curr_tracking_in = {}
         with open('./bot/config/tracking_pairs.txt', 'r') as f:
@@ -198,8 +179,22 @@ def main(update_leverage):
     except FileNotFoundError:
         curr_tracking_in = dict() # Словарь для отслеживания позиций на вход
 
+    if update_leverage:
+        print(f'{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Обновление плечей на бирже ByBit')
+        for t1_name, t2_name in token_pairs:
+            set_leverage_cached(demo, token=t1_name, leverage=leverage)
+            sleep(0.5)
+            set_leverage_cached(demo, token=t2_name, leverage=leverage)
+            sleep(0.5)
+
+    low_in = -thresh_in
+    low_out = -thresh_out
+    high_in = thresh_in
+    high_out = thresh_out
+
     time_now = datetime.now()
     last_zscore_update_time = int(datetime.timestamp(time_now))
+    last_update_time = datetime(1999, 1, 1)
     print(f'{time_now.strftime('%Y-%m-%d %H:%M:%S')} Старт основного цикла.')
 
     while True:
@@ -215,25 +210,23 @@ def main(update_leverage):
             db_manager.set_system_state('market_analyzer')
 
             # --- Проверяем работу модуля trades_executor ---
-
             if ts - db_manager.get_system_state('trades_executor') > 20:
                 print(f'{ct} Потеряна связь с trades_executor!')
                 # Сохраняем отслеживаемые пары в файл
                 save_tracking_pairs_to_file(curr_tracking_in)
                 break
 
-            # --- Подгружаем исторические датафреймы 1 раз в час ---
+            # --- Подгружаем агрегированные датафреймы 1 раз в минуту ---
             end_time = datetime.now().replace(tzinfo=ZoneInfo("Europe/Moscow"))
             start_time = end_time - timedelta(hours = td)
 
-            try:
-                last_updates_1h = (datetime.now(ZoneInfo("Europe/Moscow")) - hist_df[-1]['time'][0]).seconds
-            except NameError:
-                hist_df = get_hist_df(db_manager, start_time)
-                last_updates_1h = (datetime.now(ZoneInfo("Europe/Moscow")) - hist_df[-1]['time'][0]).seconds
-
-            if last_updates_1h > 3665: # 1 час 1 минута 5 секунд
-                hist_df = get_hist_df(db_manager, start_time)
+            if (time_now - last_update_time).seconds >= 60:
+                hist_df = db_manager.get_orderbooks(interval='1h', start_date=start_time
+                            ).with_columns(pl.col('price').alias('avg_price'))
+                agg_5m = db_manager.get_orderbooks(interval='5m', start_date=start_time
+                            ).with_columns(pl.col('price').alias('avg_price'))
+                last_update_time = time_now
+                # print(f'{ct} Обновляем агрегированные данные.')
 
             # --- Текущие данные ---
             current_data = db_manager.get_table('current_ob', df_type='polars')
@@ -282,21 +275,16 @@ def main(update_leverage):
                 t1_tick_df = tick_df.filter(pl.col('token') == token_1)
                 t2_tick_df = tick_df.filter(pl.col('token') == token_2)
 
+                t1_m = t1_tick_df['avg_price'].median()
+                t2_m = t2_tick_df['avg_price'].median()
+
                 # --- Проверяем, что датафрейм не пустой ---
                 if t1_tick_df.height < 3 or t2_tick_df.height < 3:
                     continue
 
-                # Пропускаем пару, если уже открыто максимальное количество позиций,
-                # а для этой пары позиция не открыта
-                if (pairs.height >= max_pairs and pairs.filter(
-                            (pl.col('token_1') == token_1) & (pl.col('token_2') == token_2)
-                            ).is_empty()
-                    ):
-                    continue
-
                 # --- Получаем средние цены за исторический период ---
-                token_1_hist_price = hist_df.filter(pl.col('token') == token_1).tail(2 * wind + 1)['avg_price'].to_numpy()
-                token_2_hist_price = hist_df.filter(pl.col('token') == token_2).tail(2 * wind + 1)['avg_price'].to_numpy()
+                token_1_hist_price = hist_df.filter(pl.col('token') == token_1).tail(wind + 1)['avg_price'].to_numpy()
+                token_2_hist_price = hist_df.filter(pl.col('token') == token_2).tail(wind + 1)['avg_price'].to_numpy()
 
                 # --- Получаем текущие цены ---
                 t1_data = current_data.filter(pl.col('token') == token_1)
@@ -313,8 +301,8 @@ def main(update_leverage):
                 if abs(t1_ts - t2_ts) > 10: # Если разница во времени между двумя ценами больше 10 секунд, пропускаем эту пару
                     continue
 
-                t1_med = np.append(token_1_hist_price, t1_tick_df['avg_price'].median())
-                t2_med = np.append(token_2_hist_price, t2_tick_df['avg_price'].median())
+                t1_med = np.append(token_1_hist_price, t1_m)
+                t2_med = np.append(token_2_hist_price, t2_m)
                 t1_curr = np.append(token_1_hist_price, t1_data['avg_price'][0])
                 t2_curr = np.append(token_2_hist_price, t2_data['avg_price'][0])
 
@@ -424,8 +412,17 @@ def main(update_leverage):
 
                     side_1 = opened['side_1'][0]
                     side_2 = opened['side_2'][0]
-                    t1_vol = t1_data['bid_volume_0'][0] if side_1 == 'long' else t1_data['ask_volume_0'][0]
-                    t2_vol = t2_data['ask_volume_0'][0] if side_1 == 'long' else t2_data['bid_volume_0'][0]
+
+                    if side_1 == 'long':
+                        t1_vol = t1_data.select('bid_volume_0', 'bid_volume_1',
+                                            'bid_volume_2').sum_horizontal().item()
+                        t2_vol = t2_data.select('ask_volume_0', 'ask_volume_1',
+                                            'ask_volume_2').sum_horizontal().item()
+                    else:
+                        t1_vol = t1_data.select('ask_volume_0', 'ask_volume_1',
+                                            'ask_volume_2').sum_horizontal().item()
+                        t2_vol = t2_data.select('bid_volume_0', 'bid_volume_1',
+                                            'bid_volume_2').sum_horizontal().item()
 
                     curr_profit_1 = calculate_profit(t1_op, t1_tick_df['avg_price'].median(), q1, side_1)
                     curr_profit_2 = calculate_profit(t2_op, t2_tick_df['avg_price'].median(), q2, side_2)
@@ -481,4 +478,4 @@ def main(update_leverage):
 
 
 if __name__ == '__main__':
-    main(update_leverage=True)
+    main(update_leverage=0)
